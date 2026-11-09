@@ -14,19 +14,23 @@ public:
 
     void SetScore(const ScoreCanvas* score);
     void ScoreChanged();  // the project's shape may have changed too
-    void SetSelection(int bar, int staff);
+    void SetSelection(const BarRange& range);
     void SetPlayhead(double beats, bool visible);
 
-    std::function<void(int bar, int staff)> onSelect;
+    std::function<void(const BarRange&)> onSelect;
 
 private:
     void OnPaint(wxPaintEvent&);
     void OnLeftDown(wxMouseEvent&);
+    void OnMotion(wxMouseEvent&);
+    bool HitCell(const wxPoint& client, int& bar, int& staff) const;
     double BarWidth() const;
     double RowY(int row) const;
 
     const ScoreCanvas* score_ = nullptr;
-    int selectedBar_ = -1, selectedStaff_ = -1;
+    BarRange selection_;
+    int anchorBar_ = -1, anchorStaff_ = -1;
+    bool dragging_ = false;
     double playhead_ = 0;
     bool playheadVisible_ = false;
 };

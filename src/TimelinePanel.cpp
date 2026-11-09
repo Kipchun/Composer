@@ -20,6 +20,7 @@ TimelinePanel::TimelinePanel(wxWindow* parent)
     Bind(wxEVT_PAINT, &TimelinePanel::OnPaint, this);
     Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { Refresh(); e.Skip(); });
     Bind(wxEVT_LEFT_DOWN, &TimelinePanel::OnLeftDown, this);
+    Bind(wxEVT_MOTION, &TimelinePanel::OnMotion, this);
 }
 
 void TimelinePanel::SetScore(const ScoreCanvas* score) {
@@ -32,9 +33,8 @@ void TimelinePanel::ScoreChanged() {
     Refresh();
 }
 
-void TimelinePanel::SetSelection(int bar, int staff) {
-    selectedBar_ = bar;
-    selectedStaff_ = staff;
+void TimelinePanel::SetSelection(const BarRange& range) {
+    selection_ = range;
     Refresh();
 }
 
@@ -105,25 +105,56 @@ void TimelinePanel::OnPaint(wxPaintEvent&) {
                 block.m_width *= fill;
                 FillRound(*gc, block, 2, proposed ? kProposalBright : color);
             }
-            if (bar == selectedBar_ && (selectedStaff_ < 0 || selectedStaff_ == row))
+            if (selection_.Contains(row, bar))
                 StrokeRound(*gc, cell, 2, *wxWHITE, 1.4);
         }
     }
 
     if (playheadVisible_) {
-        const double x = kLabelW + playhead_ / score_->BarBeats() * barW;
+        const int bar = project.BarAtBeat(playhead_);
+        const double x = kLabelW + (bar + (playhead_ - project.BarStart(bar)) / project.BarBeats(bar)) * barW;
         Line(*gc, x, 6, x, RowY(rows), kAccent, 2);
     }
 }
 
+bool TimelinePanel::HitCell(const wxPoint& client, int& bar, int& staff) const {
+    const wxPoint p = CalcUnscrolledPosition(client);
+    if (p.x < kLabelW) return false;
+    const int b = int((p.x - kLabelW) / BarWidth());
+    if (b >= score_->BarCount()) return false;
+    bar = b;
+    staff = p.y >= RowY(0) && p.y < RowY(score_->StaffCount()) ? int((p.y - RowY(0)) / kRowH) : -1;
+    return true;
+}
+
 void TimelinePanel::OnLeftDown(wxMouseEvent& e) {
-    const wxPoint p = CalcUnscrolledPosition(e.GetPosition());
     int bar = -1, staff = -1;
-    if (p.x >= kLabelW) {
-        const int b = int((p.x - kLabelW) / BarWidth());
-        if (b < score_->BarCount()) bar = b;
-        if (p.y >= RowY(0) && p.y < RowY(score_->StaffCount())) staff = int((p.y - RowY(0)) / kRowH);
+    BarRange range;
+    dragging_ = HitCell(e.GetPosition(), bar, staff);
+    if (dragging_) {
+        if (!e.ShiftDown() || anchorBar_ < 0) {
+            anchorBar_ = bar;
+            anchorStaff_ = staff;
+        }
+        range = MakeBarRange(anchorBar_, anchorStaff_, bar, staff);
+    } else {
+        anchorBar_ = anchorStaff_ = -1;
     }
-    SetSelection(bar, staff);
-    if (onSelect) onSelect(bar, staff);
+    SetSelection(range);
+    if (onSelect) onSelect(range);
+}
+
+void TimelinePanel::OnMotion(wxMouseEvent& e) {
+    if (!e.LeftIsDown()) {
+        dragging_ = false;
+        return;
+    }
+    int bar, staff;
+    if (!dragging_ || !HitCell(e.GetPosition(), bar, staff)) return;
+    const BarRange range = MakeBarRange(anchorBar_, anchorStaff_, bar, staff);
+    if (range.firstBar == selection_.firstBar && range.lastBar == selection_.lastBar &&
+        range.firstStaff == selection_.firstStaff && range.lastStaff == selection_.lastStaff)
+        return;
+    SetSelection(range);
+    if (onSelect) onSelect(range);
 }

@@ -17,6 +17,7 @@ struct Event {
     bool rest = false;
     std::vector<int> steps;         // diatonic steps from the staff's middle line
     std::vector<char> accidentals;  // parallel to steps; 0 means none
+    std::string articulations;      // any of . > - ^ f (staccato to fermata)
 };
 
 using Bar = std::vector<Event>;
@@ -43,7 +44,33 @@ struct Marking {
     int bar, staff;
     double beat;
     wxString text;
+    bool proposed = false;  // only set on the copy drawn during a preview
 };
+
+struct Hairpin {
+    int staff = 0, bar = 0;
+    double beat = 0;
+    int endBar = 0;
+    double endBeat = 0;
+    bool crescendo = true;
+    bool proposed = false;
+};
+
+// A time signature taking effect at a bar after the first.
+struct MeterChange {
+    int bar, top, bottom;
+};
+
+// A rectangle of bars and staves. Staves of -1 mean every staff.
+struct BarRange {
+    int firstBar = -1, lastBar = -1, firstStaff = -1, lastStaff = -1;
+    bool IsValid() const { return firstBar >= 0; }
+    bool Contains(int staff, int bar) const {
+        return IsValid() && bar >= firstBar && bar <= lastBar &&
+               (firstStaff < 0 || (staff >= firstStaff && staff <= lastStaff));
+    }
+};
+BarRange MakeBarRange(int barA, int staffA, int barB, int staffB);
 
 struct Slur {
     int bar, staff;
@@ -79,8 +106,19 @@ struct Project {
     std::vector<Section> sections;
     std::vector<Marking> markings;
     std::vector<Slur> slurs;
+    std::vector<Hairpin> hairpins;
+    std::vector<MeterChange> meters;  // sorted by bar
     std::vector<PluginSetup> plugins;
     bool demo = false;  // the built-in sample, which has a scripted Director proposal
+
+    // All in quarter notes unless noted. Bars are zero-based.
+    void MeterAt(int bar, int& top, int& bottom) const;
+    double BarBeats(int bar) const;
+    double BeatUnit(int bar) const;  // the pulse: what a metronome clicks on
+    double BeamUnit(int bar) const;
+    double BarStart(int bar) const;
+    double TotalBeats() const { return BarStart(settings.bars); }
+    int BarAtBeat(double beat) const;
 };
 
 // One selectable instrument, listed in orchestral score order.
@@ -101,7 +139,13 @@ struct BarEdit {
 struct Proposal {
     wxString title, summary;
     std::vector<BarEdit> edits;
+    std::vector<Marking> dynamics, removedDynamics;
+    std::vector<Hairpin> hairpins, removedHairpins;
 };
+
+// Adds and removes a proposal's markings in the given lists.
+void ApplyMarkEdits(const Proposal& proposal, std::vector<Marking>& markings, std::vector<Hairpin>& hairpins,
+                    bool flagProposed);
 
 const std::vector<InstrumentSpec>& InstrumentCatalog();
 int FindInstrument(const char* name);

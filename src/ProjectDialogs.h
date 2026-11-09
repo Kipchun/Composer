@@ -43,6 +43,17 @@ private:
     SettingsForm* form_;
 };
 
+class MeterDialog : public wxDialog {
+public:
+    MeterDialog(wxWindow* parent, int bar, int top, int bottom);
+    int Top() const { return top_->GetValue(); }
+    int Bottom() const { return wxAtoi(bottom_->GetStringSelection()); }
+
+private:
+    wxSpinCtrl* top_;
+    wxChoice* bottom_;
+};
+
 // Two lists: every available instrument, and the score's parts in orchestral order.
 class InstrumentPicker : public wxPanel {
 public:

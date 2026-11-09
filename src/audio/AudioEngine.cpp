@@ -138,9 +138,9 @@ bool AudioEngine::OpenAndRun(std::promise<void>& ready, bool& signalled) {
     return true;
 }
 
-void AudioEngine::Emit(int track, int offset, int pitch, bool on) {
+void AudioEngine::Emit(int track, int offset, int pitch, bool on, float velocity) {
     if (pitch < 0 || pitch > 127) return;
-    events_[track].push_back({offset, pitch, on, 0.8f});
+    events_[track].push_back({offset, pitch, on, velocity});
     active_[track][pitch] = on;
 }
 
@@ -179,7 +179,7 @@ void AudioEngine::RenderBlock() {
         const int64_t end = start + kBlock;
         while (cursor_ < schedule_.size() && schedule_[cursor_].sample < end) {
             const Scheduled& s = schedule_[cursor_++];
-            Emit(s.track, int(std::max<int64_t>(0, s.sample - start)), s.pitch, s.on);
+            Emit(s.track, int(std::max<int64_t>(0, s.sample - start)), s.pitch, s.on, s.velocity);
         }
         position_ = end;
         if (end >= totalSamples_) {
@@ -219,10 +219,8 @@ void AudioEngine::Mix() {
 }
 
 void AudioEngine::AddClick(int64_t start) {
-    const double perBeat = SamplesPerBeat() * clickUnit_;
-    const int64_t beat = int64_t(std::ceil(start / perBeat));
-    const int64_t clickAt = int64_t(std::llround(beat * perBeat));
-    const int startFrame = clickAt < start + kBlock ? int(clickAt - start) : kBlock;
+    const auto next = std::lower_bound(clicks_.begin(), clicks_.end(), start);
+    const int startFrame = next != clicks_.end() && *next < start + kBlock ? int(*next - start) : kBlock;
 
     for (int i = 0; i < kBlock; ++i) {
         if (i == startFrame) {
@@ -256,23 +254,29 @@ void AudioEngine::MoveCursor() {
                      schedule_.begin());
 }
 
-void AudioEngine::SetSchedule(const std::vector<PlayNote>& notes, double totalBeats) {
+void AudioEngine::SetSchedule(const std::vector<PlayNote>& notes, double totalBeats,
+                              const std::vector<double>& clickBeats) {
     const double perBeat = SamplesPerBeat();
     std::vector<Scheduled> schedule;
     schedule.reserve(notes.size() * 2);
     for (const PlayNote& n : notes) {
         const int64_t on = int64_t(n.beat * perBeat);
         const int64_t off = on + int64_t(n.length * 0.95 * perBeat);
-        schedule.push_back({on, n.staff, n.midi, true});
-        schedule.push_back({off, n.staff, n.midi, false});
+        schedule.push_back({on, n.staff, n.midi, true, n.velocity});
+        schedule.push_back({off, n.staff, n.midi, false, 0.f});
     }
     // At the same instant, releases go first so repeated notes retrigger.
     std::stable_sort(schedule.begin(), schedule.end(), [](const Scheduled& a, const Scheduled& b) {
         return a.sample != b.sample ? a.sample < b.sample : !a.on && b.on;
     });
 
+    std::vector<int64_t> clicks;
+    clicks.reserve(clickBeats.size());
+    for (double beat : clickBeats) clicks.push_back(int64_t(std::llround(beat * perBeat)));
+
     std::lock_guard<std::mutex> guard(lock_);
     schedule_ = std::move(schedule);
+    clicks_ = std::move(clicks);
     totalSamples_ = int64_t(totalBeats * perBeat);
     MoveCursor();
     if (playing_) allOff_ = true;  // a sounding note's release may no longer exist
@@ -322,11 +326,6 @@ void AudioEngine::SetTempo(double quartersPerMinute) {
     tempo_ = quartersPerMinute;
     for (auto& instrument : instruments_)
         if (instrument) instrument->SetTempo(tempo_);
-}
-
-void AudioEngine::SetClickUnit(double quarters) {
-    std::lock_guard<std::mutex> guard(lock_);
-    clickUnit_ = quarters;
 }
 
 void AudioEngine::Preview(int track, int pitch) {

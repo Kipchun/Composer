@@ -578,14 +578,17 @@ void DirectorPanel::RefreshModelName() {
 
 void DirectorPanel::SetBusy(bool busy) { send_->SetStopMode(busy); }
 
-void DirectorPanel::SetScope(int bar, const wxString& staffName) {
-    scopeBar_ = bar;
-    scopeStaff_ = staffName;
-    if (bar < 0) {
+void DirectorPanel::SetScope(const BarRange& range) {
+    scopeRange_ = range;
+    if (!range.IsValid()) {
         scope_ = "Entire score";
     } else {
-        scope_ = wxString::Format("Bar %d", bar + 1);
-        if (!staffName.empty()) scope_ += " " + Glyph(0x00B7) + " " + staffName;
+        scope_ = range.firstBar == range.lastBar ? wxString::Format("Bar %d", range.firstBar + 1)
+                                                 : wxString::Format("Bars %d-%d", range.firstBar + 1, range.lastBar + 1);
+        if (range.firstStaff >= 0 && score_) {
+            scope_ += " " + Glyph(0x00B7) + " " + score_->StaffName(range.firstStaff);
+            if (range.lastStaff != range.firstStaff) scope_ += " to " + score_->StaffName(range.lastStaff);
+        }
     }
     footer_->SetScope(scope_);
 }
@@ -604,7 +607,7 @@ void DirectorPanel::ResetConversation(const wxString& projectTitle) {
     SetBusy(false);
     chat_->Clear();
     chat_->Add(false, "Ready to work on " + projectTitle + ". Tell me what you'd like to change.");
-    SetScope(-1, "");
+    SetScope(BarRange{});
 }
 
 void DirectorPanel::ShowSampleConversation(const Proposal& proposal) {
@@ -617,7 +620,7 @@ void DirectorPanel::ShowSampleConversation(const Proposal& proposal) {
                        "6. I would carry it upward and add motion, leaving the harmony as written.");
     chat_->EndReply();
     chat_->AddCard(proposal);
-    SetScope(-1, "");
+    SetScope(BarRange{});
 }
 
 void DirectorPanel::ScoreChanged() { chat_->CheckStale(score_, false); }
@@ -633,9 +636,9 @@ wxString DirectorPanel::BuildContext() const {
 
     const int bars = project.settings.bars;
     int first, last;
-    if (scopeBar_ >= 0) {
-        first = std::max(0, scopeBar_ - 2);
-        last = std::min(bars - 1, scopeBar_ + 2);
+    if (scopeRange_.IsValid()) {
+        first = std::max(0, scopeRange_.firstBar - 2);
+        last = std::min({bars - 1, scopeRange_.lastBar + 2, first + 24});
     } else {
         first = 0;
         last = std::min(bars - 1, 7);

@@ -91,8 +91,8 @@ bool Fail(wxString* error, const wxString& why) {
 
 }  // namespace
 
-wxString BarToText(const Project& project, int staff, const Bar& bar) {
-    const double barBeats = project.settings.BarBeats();
+wxString BarToText(const Project& project, int staff, int barIndex, const Bar& bar) {
+    const double barBeats = project.BarBeats(barIndex);
     if (bar.size() == 1 && bar[0].rest && std::abs(bar[0].beats - barBeats) < kEps) return "R";
 
     const Clef clef = project.staves[staff].clef;
@@ -118,13 +118,14 @@ wxString BarToText(const Project& project, int staff, const Bar& bar) {
             if (n) out += ',';
             out += PitchName(clef, step, alteration);
         }
+        if (!ev.articulations.empty()) out += "/" + wxString(ev.articulations);
     }
     return out;
 }
 
-bool ParseBarText(const Project& project, int staff, const wxString& text, Bar& out, wxString* error) {
+bool ParseBarText(const Project& project, int staff, int barIndex, const wxString& text, Bar& out, wxString* error) {
     out.clear();
-    const double barBeats = project.settings.BarBeats();
+    const double barBeats = project.BarBeats(barIndex);
     const wxString trimmed = wxString(text).Trim().Trim(false);
     if (trimmed == "R") {
         out = FullBarRest(barBeats);
@@ -141,8 +142,15 @@ bool ParseBarText(const Project& project, int staff, const wxString& text, Bar& 
     while (tokens.HasMoreTokens()) {
         const wxString token = tokens.GetNextToken();
         const wxString duration = token.BeforeFirst(':');
-        const wxString body = token.AfterFirst(':');
+        wxString body = token.AfterFirst(':');
+        const wxString articulations = body.AfterFirst('/');
+        body = body.BeforeFirst('/');
         Event ev;
+        for (const wxUniChar c : articulations) {
+            if (wxString(".>-^f").Find(c) == wxNOT_FOUND)
+                return Fail(error, "\"" + token + "\" has an unknown articulation; use . > - ^ or f");
+            ev.articulations += char(c.GetValue());
+        }
         if (body.empty() || !ParseDuration(duration, ev.beats))
             return Fail(error, "\"" + token + "\" is not a valid token; expected duration:pitches, like q:Eb4");
         ev.dotted = ev.beats == 3.0 || ev.beats == 1.5 || ev.beats == 0.75;
@@ -195,6 +203,11 @@ wxString DescribeProject(const Project& project) {
     key.Replace(wxString(wxUniChar(0x266F)), "#");
     out += "Key: " + key + "\n";
     out += wxString::Format("Time signature: %d/%d\n", s.timeTop, s.timeBottom);
+    if (!project.meters.empty()) {
+        out += "Time signature changes:";
+        for (const MeterChange& m : project.meters) out += wxString::Format(" bar %d to %d/%d;", m.bar + 1, m.top, m.bottom);
+        out += "\n";
+    }
     out += wxString::Format("Tempo: quarter = %d", s.tempo);
     if (!s.tempoText.empty()) out += " (" + s.tempoText + ")";
     out += wxString::Format("\nBars: %d\nStaves:", s.bars);
@@ -212,11 +225,22 @@ wxString BarsToText(const Project& project, int firstBar, int lastBar, const std
     for (int bar = firstBar; bar <= lastBar; ++bar) {
         wxString lines;
         for (int staff : list) {
-            const wxString text = BarToText(project, staff, project.score[staff][bar]);
-            if (skipEmpty && text == "R") continue;
-            lines += "  " + StaffLabel(project, staff) + ": " + text + "\n";
+            const wxString text = BarToText(project, staff, bar, project.score[staff][bar]);
+
+            wxString marks;
+            for (const Marking& m : project.markings)
+                if (m.staff == staff && m.bar == bar) marks += " " + m.text + wxString::Format("@beat%g", m.beat + 1);
+            for (const Hairpin& h : project.hairpins)
+                if (h.staff == staff && h.bar == bar)
+                    marks += wxString(h.crescendo ? " crescendo" : " diminuendo") +
+                             wxString::Format("@beat%g-to-bar%d-beat%g", h.beat + 1, h.endBar + 1, h.endBeat + 1);
+
+            if (skipEmpty && text == "R" && marks.empty()) continue;
+            lines += "  " + StaffLabel(project, staff) + ": " + text + (marks.empty() ? wxString() : " |" + marks) + "\n";
         }
-        out += wxString::Format("Bar %d\n", bar + 1) + (lines.empty() ? wxString("  (all resting)\n") : lines);
+        int top, bottom;
+        project.MeterAt(bar, top, bottom);
+        out += wxString::Format("Bar %d (%d/%d)\n", bar + 1, top, bottom) + (lines.empty() ? wxString("  (all resting)\n") : lines);
     }
     return out;
 }

@@ -26,7 +26,7 @@ public:
     // Returns the previous instrument so the UI thread, not the audio thread, frees it.
     std::unique_ptr<Instrument> SetInstrument(int track, std::unique_ptr<Instrument> instrument);
 
-    void SetSchedule(const std::vector<PlayNote>& notes, double totalBeats);
+    void SetSchedule(const std::vector<PlayNote>& notes, double totalBeats, const std::vector<double>& clickBeats);
     void Play();
     void Pause();
     void Stop();
@@ -34,7 +34,6 @@ public:
     void SetLoop(bool on);
     void SetClick(bool on);
     void SetTempo(double quartersPerMinute);
-    void SetClickUnit(double quarters);
     void Preview(int track, int pitch);
 
     double Beats() const;
@@ -47,6 +46,7 @@ private:
         int track;
         int pitch;
         bool on;
+        float velocity;
     };
     struct Sounding {
         int track, pitch, framesLeft;
@@ -55,7 +55,7 @@ private:
     void ThreadMain(std::promise<void> ready);
     bool OpenAndRun(std::promise<void>& ready, bool& signalled);
     void RenderBlock();
-    void Emit(int track, int offset, int pitch, bool on);
+    void Emit(int track, int offset, int pitch, bool on, float velocity = 0.8f);
     void Mix();
     void AddClick(int64_t start);
     void MoveCursor();
@@ -78,7 +78,8 @@ private:
     std::vector<Sounding> previews_, newPreviews_;
     int clickFrames_ = 0;
     double clickPhase_ = 0;
-    double tempo_ = 96, clickUnit_ = 1;
+    double tempo_ = 96;
+    std::vector<int64_t> clicks_;
 
     std::vector<float> mixL_, mixR_, trackL_, trackR_;
     std::unique_ptr<std::atomic<float>[]> peaks_;

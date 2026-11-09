@@ -109,6 +109,28 @@ ProjectSettingsDialog::ProjectSettingsDialog(wxWindow* parent, const ProjectSett
     CentreOnParent();
 }
 
+MeterDialog::MeterDialog(wxWindow* parent, int bar, int top, int bottom)
+    : wxDialog(parent, wxID_ANY, "Time Signature") {
+    SetBackgroundColour(kPanel);
+    top_ = new wxSpinCtrl(this, wxID_ANY, "", wxDefaultPosition, wxSize(70, -1), wxSP_ARROW_KEYS, 1, 16, top);
+    bottom_ = new wxChoice(this, wxID_ANY);
+    for (const char* value : {"2", "4", "8"}) bottom_->Append(value);
+    bottom_->SetStringSelection(wxString::Format("%d", bottom));
+
+    auto* row = new wxBoxSizer(wxHORIZONTAL);
+    row->Add(top_, 0, wxALIGN_CENTER_VERTICAL);
+    row->Add(Label(this, "/"), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, 6);
+    row->Add(bottom_, 0, wxALIGN_CENTER_VERTICAL);
+
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    sizer->Add(Label(this, wxString::Format("From bar %d until the next time signature change:", bar + 1), kText), 0, wxALL, 16);
+    sizer->Add(row, 0, wxLEFT | wxRIGHT, 16);
+    sizer->Add(Label(this, "Setting it to match the previous section removes the change."), 0, wxALL, 16);
+    sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 16);
+    SetSizerAndFit(sizer);
+    CentreOnParent();
+}
+
 InstrumentPicker::InstrumentPicker(wxWindow* parent) : wxPanel(parent) {
     SetBackgroundColour(kPanel);
 

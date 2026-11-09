@@ -23,7 +23,7 @@ public:
     ~DirectorPanel() override;
 
     void SetScore(const ScoreCanvas* score) { score_ = score; }
-    void SetScope(int bar, const wxString& staffName);
+    void SetScope(const BarRange& range);
     void ResetConversation(const wxString& projectTitle);
     void ShowSampleConversation(const Proposal& proposal);
     void CancelRequest();
@@ -48,7 +48,6 @@ private:
     wxTextCtrl* input_;
     SendButton* send_;
     wxString scope_ = "Entire score";
-    int scopeBar_ = -1;
-    wxString scopeStaff_;
+    BarRange scopeRange_;
     double cost_ = 0;
 };

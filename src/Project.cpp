@@ -118,6 +118,105 @@ Project BuildProject(const ProjectSettings& settings, std::vector<int> instrumen
     return project;
 }
 
+BarRange MakeBarRange(int barA, int staffA, int barB, int staffB) {
+    BarRange range;
+    range.firstBar = std::min(barA, barB);
+    range.lastBar = std::max(barA, barB);
+    if (staffA >= 0 && staffB >= 0) {
+        range.firstStaff = std::min(staffA, staffB);
+        range.lastStaff = std::max(staffA, staffB);
+    }
+    return range;
+}
+
+void Project::MeterAt(int bar, int& top, int& bottom) const {
+    top = settings.timeTop;
+    bottom = settings.timeBottom;
+    for (const MeterChange& change : meters) {
+        if (change.bar > bar) break;
+        top = change.top;
+        bottom = change.bottom;
+    }
+}
+
+double Project::BarBeats(int bar) const {
+    int top, bottom;
+    MeterAt(bar, top, bottom);
+    return top * 4.0 / bottom;
+}
+
+double Project::BeatUnit(int bar) const {
+    int top, bottom;
+    MeterAt(bar, top, bottom);
+    return bottom == 8 && top % 3 == 0 ? 1.5 : 4.0 / bottom;
+}
+
+double Project::BeamUnit(int bar) const {
+    int top, bottom;
+    MeterAt(bar, top, bottom);
+    return bottom == 8 && top % 3 == 0 ? 1.5 : 1.0;
+}
+
+double Project::BarStart(int bar) const {
+    double position = 0;
+    int from = 0;
+    double beats = settings.BarBeats();
+    for (const MeterChange& change : meters) {
+        if (change.bar >= bar) break;
+        position += (change.bar - from) * beats;
+        from = change.bar;
+        beats = change.top * 4.0 / change.bottom;
+    }
+    return position + (bar - from) * beats;
+}
+
+int Project::BarAtBeat(double beat) const {
+    double position = 0;
+    int from = 0;
+    double beats = settings.BarBeats();
+    for (const MeterChange& change : meters) {
+        const double end = position + (change.bar - from) * beats;
+        if (beat < end) break;
+        position = end;
+        from = change.bar;
+        beats = change.top * 4.0 / change.bottom;
+    }
+    return std::clamp(from + int((beat - position) / beats + 1e-9), 0, settings.bars - 1);
+}
+
+void ApplyMarkEdits(const Proposal& proposal, std::vector<Marking>& markings, std::vector<Hairpin>& hairpins,
+                    bool flagProposed) {
+    const auto sameDynamicSpot = [](const Marking& a, const Marking& b) {
+        return a.staff == b.staff && a.bar == b.bar && std::abs(a.beat - b.beat) < 1e-6;
+    };
+    const auto sameHairpinStart = [](const Hairpin& a, const Hairpin& b) {
+        return a.staff == b.staff && a.bar == b.bar && std::abs(a.beat - b.beat) < 1e-6;
+    };
+    const auto eraseDynamic = [&](const Marking& spot) {
+        markings.erase(std::remove_if(markings.begin(), markings.end(),
+                                      [&](const Marking& m) { return sameDynamicSpot(m, spot); }),
+                       markings.end());
+    };
+    const auto eraseHairpin = [&](const Hairpin& spot) {
+        hairpins.erase(std::remove_if(hairpins.begin(), hairpins.end(),
+                                      [&](const Hairpin& h) { return sameHairpinStart(h, spot); }),
+                       hairpins.end());
+    };
+
+    for (const Marking& spot : proposal.removedDynamics) eraseDynamic(spot);
+    for (const Hairpin& spot : proposal.removedHairpins) eraseHairpin(spot);
+    for (Marking m : proposal.dynamics) {
+        eraseDynamic(m);
+        m.proposed = flagProposed;
+        markings.push_back(std::move(m));
+    }
+    for (Hairpin h : proposal.hairpins) {
+        eraseHairpin(h);
+        h.proposed = flagProposed;
+        hairpins.push_back(h);
+    }
+}
+
 void SortParts(std::vector<ScorePart>& parts) {
     std::stable_sort(parts.begin(), parts.end(),
                      [](const ScorePart& a, const ScorePart& b) { return a.catalog < b.catalog; });
@@ -159,6 +258,9 @@ Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
     for (const ScorePart& part : parts) indices.push_back(part.catalog);
     Project result = BuildProject(old.settings, indices);
     result.sections = old.sections;
+    result.meters = old.meters;
+    for (auto& staff : result.score)
+        for (int bar = 0; bar < int(staff.size()); ++bar) staff[bar] = FullBarRest(result.BarBeats(bar));
 
     const auto stavesOf = [](const Project& project, int track) {
         std::vector<int> staves;
@@ -192,6 +294,11 @@ Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
         if (staffMap[slur.staff] < 0) continue;
         slur.staff = staffMap[slur.staff];
         result.slurs.push_back(slur);
+    }
+    for (Hairpin hairpin : old.hairpins) {
+        if (staffMap[hairpin.staff] < 0) continue;
+        hairpin.staff = staffMap[hairpin.staff];
+        result.hairpins.push_back(hairpin);
     }
     return result;
 }
@@ -274,10 +381,16 @@ bool ParseBar(const wxString& text, Bar& out) {
     while (tokens.HasMoreTokens()) {
         const wxString token = tokens.GetNextToken();
         const wxString duration = token.BeforeFirst(':');
-        const wxString body = token.AfterFirst(':');
+        wxString body = token.AfterFirst(':');
         if (duration.empty() || body.empty()) return false;
 
         Event ev;
+        const wxString articulations = body.AfterFirst('/');
+        body = body.BeforeFirst('/');
+        for (const wxUniChar c : articulations) {
+            if (wxString(".>-^f").Find(c) == wxNOT_FOUND) return false;
+            ev.articulations += char(c.GetValue());
+        }
         const wxUniChar letter = duration[0];
         double beats = 0;
         if (letter == 'w') beats = 4;
@@ -404,6 +517,7 @@ wxString SerializeBar(const Bar& bar) {
             out += wxString::Format("%d", ev.steps[n]);
             if (ev.accidentals[n]) out += wxUniChar(ev.accidentals[n]);
         }
+        if (!ev.articulations.empty()) out += "/" + wxString(ev.articulations);
     }
     return out;
 }
@@ -462,6 +576,12 @@ bool SaveProjectFile(const wxString& path, const Project& project, wxString* err
     for (const Slur& sl : project.slurs)
         line("slur", wxString::Format("%d\t%d\t", sl.bar, sl.staff) + wxString::FromCDouble(sl.from) +
                          "\t" + wxString::FromCDouble(sl.to));
+    for (const Hairpin& h : project.hairpins)
+        line("hairpin", wxString::Format("%d\t%d\t", h.staff, h.bar) + wxString::FromCDouble(h.beat) +
+                            wxString::Format("\t%d\t", h.endBar) + wxString::FromCDouble(h.endBeat) +
+                            wxString::Format("\t%d", h.crescendo ? 1 : 0));
+    for (const MeterChange& m : project.meters)
+        line("meter", wxString::Format("%d\t%d\t%d", m.bar, m.top, m.bottom));
     for (size_t staff = 0; staff < project.score.size(); ++staff)
         for (size_t bar = 0; bar < project.score[staff].size(); ++bar)
             line("notes", wxString::Format("%zu\t%zu\t", staff, bar) +
@@ -554,6 +674,18 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
             Slur sl{};
             ok = ToInt(f[1], sl.bar) && ToInt(f[2], sl.staff) && f[3].ToCDouble(&sl.from) && f[4].ToCDouble(&sl.to);
             p.slurs.push_back(sl);
+        } else if (key == "hairpin" && need(6)) {
+            Hairpin h;
+            int crescendo = 1;
+            ok = ToInt(f[1], h.staff) && ToInt(f[2], h.bar) && f[3].ToCDouble(&h.beat) && ToInt(f[4], h.endBar) &&
+                 f[5].ToCDouble(&h.endBeat) && ToInt(f[6], crescendo);
+            h.crescendo = crescendo != 0;
+            p.hairpins.push_back(h);
+        } else if (key == "meter" && need(3)) {
+            MeterChange m{};
+            ok = ToInt(f[1], m.bar) && ToInt(f[2], m.top) && ToInt(f[3], m.bottom) && m.top >= 1 && m.top <= 16 &&
+                 (m.bottom == 2 || m.bottom == 4 || m.bottom == 8);
+            p.meters.push_back(m);
         } else if (key == "notes" && need(3)) {
             long staff = 0, bar = 0;
             ok = f[1].ToLong(&staff) && f[2].ToLong(&bar);
@@ -579,8 +711,14 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
         if (st.track < 0 || st.track >= int(p.tracks.size()))
             return Fail(error, "The project file is damaged (instruments).");
 
-    const double barBeats = s.BarBeats();
-    p.score.assign(p.staves.size(), std::vector<Bar>(s.bars, FullBarRest(barBeats)));
+    std::sort(p.meters.begin(), p.meters.end(),
+              [](const MeterChange& a, const MeterChange& b) { return a.bar < b.bar; });
+    for (const MeterChange& m : p.meters)
+        if (m.bar < 1 || m.bar >= s.bars) return Fail(error, "The project file is damaged (time signatures).");
+
+    p.score.assign(p.staves.size(), std::vector<Bar>(s.bars));
+    for (auto& staff : p.score)
+        for (int bar = 0; bar < s.bars; ++bar) staff[bar] = FullBarRest(p.BarBeats(bar));
     for (const auto& [staff, bar, body] : pendingNotes) {
         if (staff < 0 || staff >= long(p.score.size()) || bar < 0 || bar >= s.bars)
             return Fail(error, "The project file is damaged (notes).");
@@ -588,7 +726,7 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
         if (!ParseBar(body, parsed)) return Fail(error, "The project file is damaged (notes).");
         double total = 0;
         for (const Event& ev : parsed) total += ev.beats;
-        if (std::abs(total - barBeats) > 1e-6)
+        if (std::abs(total - p.BarBeats(bar)) > 1e-6)
             return Fail(error, wxString::Format("Bar %ld has the wrong length.", bar + 1));
         p.score[staff][bar] = std::move(parsed);
     }

@@ -9,6 +9,7 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
@@ -144,6 +145,9 @@ struct Vst3Instrument::Impl {
     bool processing = false, active = false, prepared = false;
     double sampleRate = 48000;
     double tempo = 96;
+    bool hasModWheel = false;
+    ParamID modWheel = 0;
+    double lastModValue = -1;
     int64_t projectSamples = 0;
     EditorWindow* editor = nullptr;
 
@@ -226,7 +230,12 @@ std::unique_ptr<Vst3Instrument> Vst3Instrument::Load(const PluginInfo& plugin, d
     if (!p.processor) return fail("The plugin cannot process audio");
     if (p.component->getBusCount(kAudio, kOutput) < 1)
         return fail("That plugin has no audio output");
-    if (p.controller) p.controller->setComponentHandler(&p.handler);
+    if (p.controller) {
+        p.controller->setComponentHandler(&p.handler);
+        FUnknownPtr<IMidiMapping> mapping(p.controller);
+        if (mapping && mapping->getMidiControllerAssignment(0, 0, ControllerNumbers::kCtrlModWheel, p.modWheel) == kResultTrue)
+            p.hasModWheel = true;
+    }
 
     // Ask for stereo on the first output; leave every other bus switched off.
     std::vector<SpeakerArrangement> in(p.component->getBusCount(kAudio, kInput), SpeakerArr::kEmpty);
@@ -297,6 +306,17 @@ void Vst3Instrument::Process(const MidiEvent* events, int count, float* left, fl
                     queue->addPoint(0, change.second, point);
             }
             p.handler.pending.clear();
+        }
+    }
+
+    if (p.hasModWheel) {
+        for (int i = 0; i < count; ++i) {
+            if (!events[i].on || events[i].velocity == p.lastModValue) continue;
+            int32 index = 0, point = 0;
+            if (IParamValueQueue* queue = p.changes.addParameterData(p.modWheel, index)) {
+                queue->addPoint(events[i].offset, events[i].velocity, point);
+                p.lastModValue = events[i].velocity;
+            }
         }
     }
 

@@ -22,6 +22,7 @@ enum {
     ID_ChangeInstruments,
     ID_DirectorSettings,
     ID_DirectorNew,
+    ID_MeterChange,
 };
 const char* const kFileFilter = "Composer projects (*.composer)|*.composer";
 const char* const kPaneDirector = "director";
@@ -83,6 +84,7 @@ void MainFrame::BuildMenus() {
     score->Append(ID_ChangeInstruments, "Add or Remove &Instruments...\tCtrl+Shift+I");
     score->Append(ID_Instruments, "Instrument S&ounds... (I)");
     score->Append(ID_ProjectSettings, "Project &Settings...\tCtrl+Shift+P");
+    score->Append(ID_MeterChange, "&Change Time Signature at Selection...\tCtrl+Shift+T");
 
     auto* playback = new wxMenu;
     playback->Append(wxID_ANY, "&Play / Pause (Space)");
@@ -111,6 +113,7 @@ void MainFrame::BuildMenus() {
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowInstruments(); }, ID_Instruments);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { EditSettings(); }, ID_ProjectSettings);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeInstruments(); }, ID_ChangeInstruments);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeMeter(); }, ID_MeterChange);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) {
         ShowDirectorSettings(this);
         director_->RefreshModelName();
@@ -206,15 +209,16 @@ void MainFrame::BuildPanes() {
 }
 
 void MainFrame::Connect() {
-    score_->onSelect = [this](int bar, int staff) {
-        timeline_->SetSelection(bar, staff);
-        director_->SetScope(bar, staff >= 0 ? score_->StaffName(staff) : wxString());
-        if (bar >= 0) SetStatusText(wxString::Format("Selected bar %d", bar + 1), 0);
-        else SetStatusText("Selection cleared", 0);
+    score_->onSelect = [this](const BarRange& range) {
+        timeline_->SetSelection(range);
+        director_->SetScope(range);
+        if (!range.IsValid()) SetStatusText("Selection cleared", 0);
+        else if (range.firstBar == range.lastBar) SetStatusText(wxString::Format("Selected bar %d", range.firstBar + 1), 0);
+        else SetStatusText(wxString::Format("Selected bars %d-%d", range.firstBar + 1, range.lastBar + 1), 0);
     };
-    timeline_->onSelect = [this](int bar, int staff) {
+    timeline_->onSelect = [this](const BarRange& range) {
         score_->SetFocus();
-        Select(bar, staff);
+        Select(range);
     };
     score_->onZoom = [this](double z) { transport_->SetZoomPercent(int(z * 100 + 0.5)); };
     transport_->onAction = [this](TransportBar::Action a) {
@@ -226,12 +230,17 @@ void MainFrame::Connect() {
         SetStatusText("Tool: " + tool, 0);
     };
     palette_->onNoteInputChanged = [this] { SyncInputValue(); };
+    palette_->onMark = [this](char articulation, const wxString& dynamic, int hairpin) {
+        OnPaletteMark(articulation, dynamic, hairpin);
+    };
+    score_->onMarkUsed = [this] { palette_->ClearMarks(); };
     score_->onAccidentalUsed = [this] { palette_->ClearAccidental(); };
     score_->onChanged = [this] {
         timeline_->ScoreChanged();
         PushSchedule();
         SetModified(true);
         director_->ScoreChanged();
+        Publish();
     };
     score_->onNotePreview = [this](int track, int midi) { engine_->Preview(track, midi); };
     score_->onInputStatus = [this](const wxString& text) { SetStatusText(text, 0); };
@@ -254,7 +263,7 @@ void MainFrame::Connect() {
 }
 
 void MainFrame::PushSchedule() {
-    engine_->SetSchedule(score_->BuildPlayback(), score_->TotalBeats());
+    engine_->SetSchedule(score_->BuildPlayback(), score_->TotalBeats(), score_->ClickBeats());
 }
 
 void MainFrame::StopPlayback() {
@@ -271,7 +280,6 @@ void MainFrame::PushProjectInfo() {
                       wxString::Format("  %d staves", score_->StaffCount()),
                   2);
     engine_->SetTempo(s.tempo);
-    engine_->SetClickUnit(s.BeatUnit());
     PushSchedule();
 }
 
@@ -316,7 +324,7 @@ void MainFrame::ApplyProject(const Project& project, const wxString& path, bool 
     }
 
     timeline_->SetScore(score_);
-    timeline_->SetSelection(-1, -1);
+    timeline_->SetSelection(BarRange{});
     timeline_->SetPlayhead(0, false);
     director_->CancelRequest();
     if (current.demo) director_->ShowSampleConversation(MakeDemoProposal(current));
@@ -466,7 +474,7 @@ void MainFrame::EditSettings() {
     score_->ApplySettings(next);
     if (wasDemo && !score_->GetProject().demo) director_->ResetConversation(next.title);
     PushProjectInfo();
-    timeline_->SetSelection(-1, -1);
+    timeline_->SetSelection(BarRange{});
     SetModified(true);
 }
 
@@ -533,9 +541,51 @@ void MainFrame::OnCharHook(wxKeyEvent& event) {
     else event.Skip();
 }
 
-void MainFrame::Select(int bar, int staff) {
-    score_->SetSelection(bar, staff);
-    director_->SetScope(bar, staff >= 0 ? score_->StaffName(staff) : wxString());
+void MainFrame::Select(const BarRange& range) {
+    score_->SetSelection(range);
+    director_->SetScope(range);
+}
+
+void MainFrame::OnPaletteMark(char articulation, const wxString& dynamic, int hairpin) {
+    if (score_->IsNoteInput() && hairpin == 0) {
+        // Held for the next note or click; the button lights until it's used.
+        score_->SetPendingMark(articulation, dynamic);
+        return;
+    }
+    if (articulation == 0 && dynamic.empty() && hairpin == 0) return;
+
+    bool done;
+    if (hairpin != 0) done = score_->ApplyHairpinToSelection(hairpin > 0);
+    else if (!dynamic.empty()) done = score_->ApplyDynamicToSelection(dynamic);
+    else done = score_->ToggleArticulationInSelection(articulation);
+
+    palette_->ClearMarks();
+    SetStatusText(done ? wxString("Marking updated. Ctrl+Z to undo.")
+                       : wxString("Select bars with notes first, or press N and click a note."),
+                  0);
+}
+
+void MainFrame::ChangeMeter() {
+    const BarRange& range = score_->GetSelection();
+    const int bar = range.IsValid() ? range.firstBar : 0;
+    int top, bottom;
+    score_->GetProject().MeterAt(bar, top, bottom);
+
+    MeterDialog dialog(this, bar, top, bottom);
+    if (dialog.ShowModal() != wxID_OK || (dialog.Top() == top && dialog.Bottom() == bottom)) return;
+
+    if (score_->WouldMeterLoseNotes(bar, dialog.Top(), dialog.Bottom()) &&
+        wxMessageBox("Some bars get shorter, so notes past the new barlines will be removed. Ctrl+Z undoes this.\n\nContinue?",
+                     "Time Signature", wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) != wxYES)
+        return;
+
+    const bool wasDemo = score_->GetProject().demo;
+    StopPlayback();
+    score_->SetMeterChange(bar, dialog.Top(), dialog.Bottom());
+    if (wasDemo) director_->ResetConversation(score_->GetProject().settings.title);
+    Select(BarRange{});
+    timeline_->SetSelection(BarRange{});
+    SetStatusText("Time signature updated. Ctrl+Z to undo.", 0);
 }
 
 void MainFrame::TogglePane(const wxString& name) {
@@ -597,8 +647,11 @@ void MainFrame::Publish() {
     beats_ = engine_->Beats();
     score_->SetPlayhead(beats_, showHead_);
     timeline_->SetPlayhead(beats_, showHead_);
-    const ProjectSettings& settings = score_->GetProject().settings;
-    const int bar = int(beats_ / settings.BarBeats());
-    const int beat = int((beats_ - bar * settings.BarBeats()) / settings.BeatUnit());
+    const Project& project = score_->GetProject();
+    const int bar = project.BarAtBeat(beats_);
+    const int beat = int((beats_ - project.BarStart(bar)) / project.BeatUnit(bar) + 1e-6);
     transport_->SetPosition(bar + 1, beat + 1);
+    int top, bottom;
+    project.MeterAt(bar, top, bottom);
+    transport_->SetTimeLabel(wxString::Format("%d/%d", top, bottom));
 }

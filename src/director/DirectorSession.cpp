@@ -16,13 +16,17 @@ const char* const kSystemPrompt = R"(You are the Director, a composer's assistan
 
 Each message begins with the project's current state and the user's selection. If they say "this" or "here", they mean the selection. Use read_score whenever you need bars you haven't been shown.
 
-To change the music, call propose_edit. The user hears and reviews your proposal before anything changes, so describe what you did in its summary and don't ask permission first. For questions and discussion, just answer. Change only what was asked, and leave other bars and staves alone unless the request calls for them. You can currently edit notes only. If asked to change tempo, key, dynamics, articulations or the instrument list, say that you can't do that yet.
+To change the music, call propose_edit. The user hears and reviews your proposal before anything changes, so describe what you did in its summary and don't ask permission first. For questions and discussion, just answer. Change only what was asked, and leave other bars and staves alone unless the request calls for them. You can edit notes, articulations, dynamics and hairpins. If asked to change tempo, key, time signature or the instrument list, say that you can't do that yet.
 
 Notation used by read_score and propose_edit:
 - A bar is a space-separated list of tokens: duration:pitches
 - Durations: w whole, h half, q quarter, e eighth, s sixteenth. A trailing dot makes it dotted: h. q. e.
 - Pitches: scientific names at sounding pitch, such as Eb4, F#5, C4 (middle C). Chords use commas: h:C4,Eb4,G4
 - A rest is q:r. A whole bar of rest is the single token R.
+- Articulations follow a slash after the pitches: q:Eb4/. is staccato. Codes: . staccato, > accent, - tenuto, ^ marcato, f fermata. They combine, as in q:Eb4/.>
+- In read_score, text after | lists that staff's dynamics and hairpins in the bar.
+- Beats in dynamics and hairpins count quarter notes from the start of the bar: 1 is the downbeat, 1.5 the off-beat, whatever the time signature.
+- Bars can differ in time signature. Each bar is labelled with its own in read_score.
 - Write the pitch you want heard. A note with no accidental is the natural note, so in E-flat major you must write Bb4, Eb5 and Ab4. Composer works out the printed accidentals.
 - Each bar must add up exactly to the length of the bar. There are no ties or tuplets yet, so notes can't cross a barline.
 
@@ -65,9 +69,39 @@ json Tools() {
                 },
                 "required": ["staff", "bar", "notes"]
               }
+            },
+            "dynamics": {
+              "type": "array",
+              "description": "Dynamic marks to add. A new mark replaces any at the same spot; mark none removes one.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "staff": {"type": "string"},
+                  "bar": {"type": "integer"},
+                  "beat": {"type": "number"},
+                  "mark": {"type": "string", "enum": ["pp", "p", "mp", "mf", "f", "ff", "none"]}
+                },
+                "required": ["staff", "bar", "beat", "mark"]
+              }
+            },
+            "hairpins": {
+              "type": "array",
+              "description": "Crescendos and diminuendos. Type none removes the hairpin starting at that spot.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "staff": {"type": "string"},
+                  "start_bar": {"type": "integer"},
+                  "start_beat": {"type": "number"},
+                  "end_bar": {"type": "integer"},
+                  "end_beat": {"type": "number", "description": "Where it ends; one past the last beat means the end of the bar."},
+                  "type": {"type": "string", "enum": ["crescendo", "diminuendo", "none"]}
+                },
+                "required": ["staff", "start_bar", "start_beat", "end_bar", "end_beat", "type"]
+              }
             }
           },
-          "required": ["title", "summary", "changes"]
+          "required": ["title", "summary"]
         }
       }
     ])");
@@ -304,15 +338,19 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
         error = "A title is required.";
         return false;
     }
-    if (!input.contains("changes") || !input["changes"].is_array() || input["changes"].empty()) {
-        error = "changes must be a non-empty array.";
+    const auto listOf = [&](const char* name) {
+        return input.contains(name) && input[name].is_array() ? input[name] : json::array();
+    };
+    const json changes = listOf("changes"), dynamics = listOf("dynamics"), hairpins = listOf("hairpins");
+    if (changes.empty() && dynamics.empty() && hairpins.empty()) {
+        error = "Include at least one of changes, dynamics or hairpins.";
         return false;
     }
 
     // Collect every problem so one correction round is enough.
     wxString problems;
     std::set<std::pair<int, int>> seen;
-    for (const json& change : input["changes"]) {
+    for (const json& change : changes) {
         const wxString staffName = Utf8Field(change, "staff");
         const int staff = FindStaffByName(project, staffName);
         const bool hasBar = change.contains("bar") && change["bar"].is_number_integer();
@@ -338,11 +376,68 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
         edit.bar = bar;
         edit.original = project.score[staff][bar];
         wxString why;
-        if (!ParseBarText(project, staff, Utf8Field(change, "notes"), edit.replacement, &why)) {
+        if (!ParseBarText(project, staff, bar, Utf8Field(change, "notes"), edit.replacement, &why)) {
             problems += where + why + ".\n";
             continue;
         }
         out.edits.push_back(std::move(edit));
+    }
+
+    const auto numberField = [](const json& object, const char* name, double fallback) {
+        return object.contains(name) && object[name].is_number() ? object[name].get<double>() : fallback;
+    };
+    const auto intField = [](const json& object, const char* name) {
+        return object.contains(name) && object[name].is_number_integer() ? object[name].get<int>() : 0;
+    };
+
+    for (const json& entry : dynamics) {
+        const wxString staffName = Utf8Field(entry, "staff");
+        const int staff = FindStaffByName(project, staffName);
+        const int bar = intField(entry, "bar") - 1;
+        const double beat = numberField(entry, "beat", 1) - 1;
+        const wxString mark = Utf8Field(entry, "mark");
+        if (staff < 0 || bar < 0 || bar >= project.settings.bars || beat < 0 || beat >= project.BarBeats(bar)) {
+            problems += "Dynamic on \"" + staffName + wxString::Format("\" at bar %d is out of range.\n", bar + 1);
+            continue;
+        }
+        if (mark != "none" && mark != "pp" && mark != "p" && mark != "mp" && mark != "mf" && mark != "f" && mark != "ff") {
+            problems += "\"" + mark + "\" is not a dynamic.\n";
+            continue;
+        }
+        Marking m{bar, staff, beat, mark};
+        (mark == "none" ? out.removedDynamics : out.dynamics).push_back(std::move(m));
+    }
+
+    for (const json& entry : hairpins) {
+        const wxString staffName = Utf8Field(entry, "staff");
+        Hairpin h;
+        h.staff = FindStaffByName(project, staffName);
+        h.bar = intField(entry, "start_bar") - 1;
+        h.beat = numberField(entry, "start_beat", 1) - 1;
+        h.endBar = intField(entry, "end_bar") - 1;
+        h.endBeat = numberField(entry, "end_beat", 1) - 1;
+        const wxString type = Utf8Field(entry, "type");
+        const int bars = project.settings.bars;
+        const bool inRange = h.staff >= 0 && h.bar >= 0 && h.bar < bars && h.beat >= 0 && h.beat < project.BarBeats(h.bar);
+        if (!inRange) {
+            problems += "Hairpin on \"" + staffName + wxString::Format("\" at bar %d is out of range.\n", h.bar + 1);
+            continue;
+        }
+        if (type == "none") {
+            out.removedHairpins.push_back(h);
+            continue;
+        }
+        if (type != "crescendo" && type != "diminuendo") {
+            problems += "\"" + type + "\" is not a hairpin type.\n";
+            continue;
+        }
+        if (h.endBar < 0 || h.endBar >= bars || h.endBeat < 0 || h.endBeat > project.BarBeats(h.endBar) + 1e-6 ||
+            project.BarStart(h.endBar) + h.endBeat <= project.BarStart(h.bar) + h.beat) {
+            problems += "Hairpin on \"" + staffName + wxString::Format("\" at bar %d must end after it starts, within the score.\n", h.bar + 1);
+            continue;
+        }
+        h.crescendo = type == "crescendo";
+        out.hairpins.push_back(h);
     }
 
     if (!problems.empty()) {

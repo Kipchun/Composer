@@ -30,6 +30,12 @@ void TransportBar::SetProjectInfo(int tempo, const wxString& key, const wxString
     Refresh();
 }
 
+void TransportBar::SetTimeLabel(const wxString& time) {
+    if (time == timeLabel_) return;
+    timeLabel_ = time;
+    Refresh();
+}
+
 void TransportBar::SetZoomPercent(int percent) {
     zoom_ = percent;
     Refresh();

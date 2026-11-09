@@ -3,7 +3,9 @@
 using namespace ui;
 
 namespace {
-constexpr int kNotes = 0, kAccidentals = 1;
+constexpr int kNotes = 0, kAccidentals = 1, kArticulations = 2, kDynamics = 3;
+const char kArticulationCodes[] = {'.', '>', '-', '^', 'f'};
+const char* const kDynamicNames[] = {"pp", "p", "mp", "mf", "f", "ff"};
 constexpr int kDot = 5, kRest = 6;
 const char kAccidentalCodes[] = {'#', 'b', 'n', 'x', 'B'};
 const double kValues[] = {4, 2, 1, 0.5, 0.25};
@@ -138,6 +140,18 @@ void PalettePanel::OnLeftDown(wxMouseEvent& e) {
         sections_[s].selected = sections_[s].selected == i ? -1 : i;
     }
     if (s == kNotes || s == kAccidentals) NotifyInput();
+
+    if ((s == kArticulations || s == kDynamics) && onMark) {
+        sections_[s == kArticulations ? kDynamics : kArticulations].selected = -1;
+        const int on = sections_[s].selected;
+        char articulation = 0;
+        wxString dynamic;
+        int hairpin = 0;
+        if (on >= 0 && s == kArticulations) articulation = kArticulationCodes[on];
+        else if (on >= 0 && on < 6) dynamic = kDynamicNames[on];
+        else if (on >= 6) hairpin = on == 6 ? 1 : -1;
+        onMark(articulation, dynamic, hairpin);
+    }
     if (onTool) onTool(sections_[s].items[i].tip);
     Refresh();
 }
@@ -181,4 +195,10 @@ void PalettePanel::SetAccidental(char accidental) {
 void PalettePanel::ClearAccidental() {
     sections_[kAccidentals].selected = -1;
     NotifyInput();
+}
+
+void PalettePanel::ClearMarks() {
+    sections_[kArticulations].selected = -1;
+    sections_[kDynamics].selected = -1;
+    Refresh();
 }

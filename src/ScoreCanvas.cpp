@@ -95,6 +95,43 @@ void DrawAccidental(wxGraphicsContext& gc, double x, double y, char accidental,
     }
 }
 
+void DrawArticulation(wxGraphicsContext& gc, double x, double y, char code, bool below, const wxColour& ink) {
+    switch (code) {
+        case '.':
+            NoPen(gc);
+            gc.SetBrush(wxBrush(ink));
+            gc.DrawEllipse(x - 2, y - 2, 4, 4);
+            break;
+        case '>':
+            Line(gc, x - 6, y - 3.5, x + 6, y, ink, 1.4);
+            Line(gc, x + 6, y, x - 6, y + 3.5, ink, 1.4);
+            break;
+        case '-':
+            Line(gc, x - 6, y, x + 6, y, ink, 1.8);
+            break;
+        case '^': {
+            const double tip = below ? 5 : -5;
+            Line(gc, x - 5, y - tip, x, y + tip, ink, 2);
+            Line(gc, x, y + tip, x + 5, y - tip, ink, 1.2);
+            break;
+        }
+        case 'f': {
+            wxGraphicsPath arc = gc.CreatePath();
+            arc.MoveToPoint(x - 9, y);
+            arc.AddCurveToPoint(x - 8, y - 13, x + 8, y - 13, x + 9, y);
+            SetStroke(gc, ink, 1.4);
+            gc.SetBrush(*wxTRANSPARENT_BRUSH);
+            gc.StrokePath(arc);
+            NoPen(gc);
+            gc.SetBrush(wxBrush(ink));
+            gc.DrawEllipse(x - 1.8, y - 5, 3.6, 3.6);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 }  // namespace
 
 ScoreCanvas::ScoreCanvas(wxWindow* parent)
@@ -121,8 +158,8 @@ void ScoreCanvas::SetProject(const Project& project) {
     project_ = project;
     undo_.clear();
     redo_.clear();
-    preview_.clear();
-    selectedBar_ = selectedStaff_ = -1;
+    ClearPreview();
+    selection_ = BarRange{};
     playheadVisible_ = false;
     followSystem_ = -1;
     noteInput_ = false;
@@ -133,12 +170,14 @@ void ScoreCanvas::SetProject(const Project& project) {
 }
 
 bool ScoreCanvas::WouldLoseNotes(const ProjectSettings& next) const {
-    const double nextBeats = next.BarBeats();
+    Project probe;
+    probe.settings = next;
+    probe.meters = project_.meters;
     for (const auto& staff : score_) {
         for (int bar = 0; bar < int(staff.size()); ++bar) {
             double pos = 0;
             for (const Event& ev : staff[bar]) {
-                if (!ev.rest && (bar >= next.bars || pos + ev.beats > nextBeats + kEps)) return true;
+                if (!ev.rest && (bar >= next.bars || pos + ev.beats > probe.BarBeats(bar) + kEps)) return true;
                 pos += ev.beats;
             }
         }
@@ -147,27 +186,254 @@ bool ScoreCanvas::WouldLoseNotes(const ProjectSettings& next) const {
 }
 
 void ScoreCanvas::ApplySettings(const ProjectSettings& next) {
-    const double oldBeats = BarBeats();
-    project_.settings = next;
-    const double beats = next.BarBeats();
+    const int oldBars = BarCount();
+    std::vector<double> oldBeats(oldBars);
+    for (int bar = 0; bar < oldBars; ++bar) oldBeats[bar] = BarBeats(bar);
 
+    project_.settings = next;
+    auto& meters = project_.meters;
+    meters.erase(std::remove_if(meters.begin(), meters.end(),
+                                [&](const MeterChange& m) { return m.bar >= next.bars; }),
+                 meters.end());
+
+    bool meterChanged = false;
     for (int staff = 0; staff < StaffCount(); ++staff) {
-        score_[staff].resize(next.bars, FullBarRest(oldBeats));
-        if (std::abs(oldBeats - beats) > kEps)
-            for (int bar = 0; bar < next.bars; ++bar)
-                WriteRange(staff, bar, beats, oldBeats + beats, nullptr);
+        score_[staff].resize(next.bars);
+        for (int bar = 0; bar < next.bars; ++bar) {
+            const double beats = BarBeats(bar);
+            if (bar >= oldBars) {
+                score_[staff][bar] = FullBarRest(beats);
+            } else if (std::abs(oldBeats[bar] - beats) > kEps) {
+                WriteRange(staff, bar, beats, oldBeats[bar] + beats, nullptr);
+                meterChanged = true;
+            }
+        }
     }
     // Changing the shape of the score invalidates undo snapshots and the bar selection.
     undo_.clear();
     redo_.clear();
-    if (selectedBar_ >= next.bars) selectedBar_ = selectedStaff_ = -1;
+    if (selection_.firstBar >= next.bars) selection_ = BarRange{};
+    else if (selection_.lastBar >= next.bars) selection_.lastBar = next.bars - 1;
     if (caret_.bar >= next.bars) caret_.bar = next.bars - 1;
-    if (caret_.beat >= beats) caret_.beat = 0;
-    if (std::abs(oldBeats - beats) > kEps) project_.demo = false;  // its proposal no longer fits
-    preview_.clear();
+    if (caret_.bar >= 0 && caret_.beat >= BarBeats(caret_.bar)) caret_.beat = 0;
+    if (meterChanged) project_.demo = false;  // its proposal no longer fits
+    FitMarksToBars();
+    ClearPreview();
     hover_ = lastEntered_ = Target{};
     RefreshLayout();
     if (onChanged) onChanged();
+}
+
+bool ScoreCanvas::ShowsMeter(int bar) const {
+    for (const MeterChange& change : project_.meters)
+        if (change.bar == bar) return true;
+    return false;
+}
+
+bool ScoreCanvas::WouldMeterLoseNotes(int bar, int top, int bottom) const {
+    int end = BarCount();
+    for (const MeterChange& change : project_.meters) {
+        if (change.bar > bar) {
+            end = change.bar;
+            break;
+        }
+    }
+    const double beats = top * 4.0 / bottom;
+    for (const auto& staff : score_) {
+        for (int b = bar; b < end; ++b) {
+            double pos = 0;
+            for (const Event& ev : staff[b]) {
+                if (!ev.rest && pos + ev.beats > beats + kEps) return true;
+                pos += ev.beats;
+            }
+        }
+    }
+    return false;
+}
+
+void ScoreCanvas::SetMeterChange(int bar, int top, int bottom) {
+    PushUndo();
+    std::vector<double> oldBeats(BarCount());
+    for (int b = 0; b < BarCount(); ++b) oldBeats[b] = BarBeats(b);
+
+    auto& meters = project_.meters;
+    meters.erase(std::remove_if(meters.begin(), meters.end(), [&](const MeterChange& m) { return m.bar == bar; }),
+                 meters.end());
+    if (bar == 0) {
+        project_.settings.timeTop = top;
+        project_.settings.timeBottom = bottom;
+    } else {
+        int previousTop, previousBottom;
+        project_.MeterAt(bar - 1, previousTop, previousBottom);
+        if (previousTop != top || previousBottom != bottom) {
+            meters.push_back({bar, top, bottom});
+            std::sort(meters.begin(), meters.end(),
+                      [](const MeterChange& a, const MeterChange& b) { return a.bar < b.bar; });
+        }
+    }
+    // A later change that now repeats the same meter is redundant.
+    for (size_t i = 0; i < meters.size();) {
+        int previousTop, previousBottom;
+        project_.MeterAt(meters[i].bar - 1, previousTop, previousBottom);
+        if (meters[i].top == previousTop && meters[i].bottom == previousBottom) meters.erase(meters.begin() + i);
+        else ++i;
+    }
+
+    for (int b = 0; b < BarCount(); ++b) {
+        const double beats = BarBeats(b);
+        if (std::abs(oldBeats[b] - beats) < kEps) continue;
+        for (int staff = 0; staff < StaffCount(); ++staff) WriteRange(staff, b, beats, oldBeats[b] + beats, nullptr);
+    }
+    if (caret_.bar >= 0 && caret_.beat >= BarBeats(caret_.bar)) caret_.beat = 0;
+    project_.demo = false;
+    FitMarksToBars();
+    ClearPreview();
+    hover_ = lastEntered_ = Target{};
+    Changed();
+}
+
+// Bars can shrink or disappear; marks outside them go, and hairpins end at the barline.
+void ScoreCanvas::FitMarksToBars() {
+    auto& marks = project_.markings;
+    marks.erase(std::remove_if(marks.begin(), marks.end(),
+                               [&](const Marking& m) { return m.bar >= BarCount() || m.beat >= BarBeats(m.bar) - kEps; }),
+                marks.end());
+    auto& pins = project_.hairpins;
+    pins.erase(std::remove_if(pins.begin(), pins.end(),
+                              [&](const Hairpin& h) { return h.bar >= BarCount() || h.beat >= BarBeats(h.bar) - kEps; }),
+               pins.end());
+    for (Hairpin& h : pins) {
+        if (h.endBar >= BarCount()) {
+            h.endBar = BarCount() - 1;
+            h.endBeat = BarBeats(h.endBar);
+        }
+        h.endBeat = std::min(h.endBeat, BarBeats(h.endBar));
+    }
+}
+
+ScoreCanvas::Snapshot ScoreCanvas::Capture() const {
+    return {score_, project_.meters, project_.markings, project_.hairpins, project_.settings.timeTop,
+            project_.settings.timeBottom};
+}
+
+void ScoreCanvas::Restore(Snapshot snapshot) {
+    score_ = std::move(snapshot.score);
+    project_.meters = std::move(snapshot.meters);
+    project_.markings = std::move(snapshot.markings);
+    project_.hairpins = std::move(snapshot.hairpins);
+    project_.settings.timeTop = snapshot.timeTop;
+    project_.settings.timeBottom = snapshot.timeBottom;
+    if (caret_.bar >= 0 && caret_.beat >= BarBeats(caret_.bar)) caret_.beat = 0;
+}
+
+void ScoreCanvas::ClearPreview() {
+    preview_.clear();
+    hasMarkPreview_ = false;
+    previewMarkings_.clear();
+    previewHairpins_.clear();
+}
+
+void ScoreCanvas::SetPendingMark(char articulation, const wxString& dynamic) {
+    pendingArticulation_ = articulation;
+    pendingDynamic_ = dynamic;
+}
+
+void ScoreCanvas::ClearPendingMark() {
+    const bool had = pendingArticulation_ || !pendingDynamic_.empty();
+    pendingArticulation_ = 0;
+    pendingDynamic_.clear();
+    if (had && onMarkUsed) onMarkUsed();
+}
+
+void ScoreCanvas::ToggleDynamic(int staff, int bar, double beat, const wxString& dynamic) {
+    auto& marks = project_.markings;
+    bool same = false;
+    for (auto it = marks.begin(); it != marks.end();) {
+        if (it->staff == staff && it->bar == bar && std::abs(it->beat - beat) < kEps) {
+            same = same || it->text == dynamic;
+            it = marks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (!same) marks.push_back({bar, staff, beat, dynamic});
+}
+
+bool ScoreCanvas::ApplyDynamicToSelection(const wxString& dynamic) {
+    if (!selection_.IsValid()) return false;
+    PushUndo();
+    const int first = selection_.firstStaff < 0 ? 0 : selection_.firstStaff;
+    const int last = selection_.firstStaff < 0 ? StaffCount() - 1 : selection_.lastStaff;
+    for (int staff = first; staff <= last; ++staff) {
+        auto& marks = project_.markings;
+        marks.erase(std::remove_if(marks.begin(), marks.end(),
+                                   [&](const Marking& m) {
+                                       return m.staff == staff && m.bar == selection_.firstBar && m.beat < kEps;
+                                   }),
+                    marks.end());
+        marks.push_back({selection_.firstBar, staff, 0.0, dynamic});
+    }
+    Changed();
+    return true;
+}
+
+bool ScoreCanvas::ApplyHairpinToSelection(bool crescendo) {
+    if (!selection_.IsValid()) return false;
+    PushUndo();
+    const int first = selection_.firstStaff < 0 ? 0 : selection_.firstStaff;
+    const int last = selection_.firstStaff < 0 ? StaffCount() - 1 : selection_.lastStaff;
+    for (int staff = first; staff <= last; ++staff) {
+        auto& pins = project_.hairpins;
+        pins.erase(std::remove_if(pins.begin(), pins.end(),
+                                  [&](const Hairpin& h) {
+                                      return h.staff == staff && h.bar == selection_.firstBar && h.beat < kEps;
+                                  }),
+                   pins.end());
+        Hairpin hairpin;
+        hairpin.staff = staff;
+        hairpin.bar = selection_.firstBar;
+        hairpin.endBar = selection_.lastBar;
+        hairpin.endBeat = BarBeats(selection_.lastBar);
+        hairpin.crescendo = crescendo;
+        pins.push_back(hairpin);
+    }
+    Changed();
+    return true;
+}
+
+bool ScoreCanvas::ToggleArticulationInSelection(char articulation) {
+    if (!selection_.IsValid()) return false;
+    const int first = selection_.firstStaff < 0 ? 0 : selection_.firstStaff;
+    const int last = selection_.firstStaff < 0 ? StaffCount() - 1 : selection_.lastStaff;
+
+    // Add it wherever it's missing; only if every note has it does it come off.
+    bool anyNote = false, anyMissing = false;
+    for (int staff = first; staff <= last; ++staff) {
+        for (int bar = selection_.firstBar; bar <= selection_.lastBar; ++bar) {
+            if (IsProposalBar(staff, bar)) continue;
+            for (const Event& ev : score_[staff][bar]) {
+                if (ev.rest) continue;
+                anyNote = true;
+                anyMissing = anyMissing || ev.articulations.find(articulation) == std::string::npos;
+            }
+        }
+    }
+    if (!anyNote) return false;
+
+    PushUndo();
+    for (int staff = first; staff <= last; ++staff) {
+        for (int bar = selection_.firstBar; bar <= selection_.lastBar; ++bar) {
+            if (IsProposalBar(staff, bar)) continue;
+            for (Event& ev : score_[staff][bar]) {
+                if (ev.rest) continue;
+                const size_t found = ev.articulations.find(articulation);
+                if (anyMissing && found == std::string::npos) ev.articulations += articulation;
+                else if (!anyMissing && found != std::string::npos) ev.articulations.erase(found, 1);
+            }
+        }
+    }
+    Changed();
+    return true;
 }
 
 void ScoreCanvas::RefreshLayout() {
@@ -224,14 +490,18 @@ void ScoreCanvas::SetZoom(double zoom) {
 }
 
 void ScoreCanvas::ShowProposal(const Proposal& proposal) {
-    preview_.clear();
+    ClearPreview();
     for (const BarEdit& edit : proposal.edits) preview_[{edit.staff, edit.bar}] = edit.replacement;
+    previewMarkings_ = project_.markings;
+    previewHairpins_ = project_.hairpins;
+    ApplyMarkEdits(proposal, previewMarkings_, previewHairpins_, true);
+    hasMarkPreview_ = true;
     ComputeLayout();
     Refresh();
 }
 
 void ScoreCanvas::HideProposal() {
-    preview_.clear();
+    ClearPreview();
     ComputeLayout();
     Refresh();
 }
@@ -249,7 +519,8 @@ void ScoreCanvas::ApplyProposal(const Proposal& proposal) {
     if (IsProposalStale(proposal)) return;
     PushUndo();
     for (const BarEdit& edit : proposal.edits) score_[edit.staff][edit.bar] = edit.replacement;
-    preview_.clear();
+    ApplyMarkEdits(proposal, project_.markings, project_.hairpins, false);
+    ClearPreview();
     Changed();
 }
 
@@ -258,7 +529,7 @@ void ScoreCanvas::SetPlayhead(double beats, bool visible) {
     playheadVisible_ = visible;
     if (visible) {
         // Turn to each new line of music as playback reaches it.
-        const int system = std::min(SystemOfBar(int(beats / BarBeats())), int(systems_.size()) - 1);
+        const int system = std::min(SystemOfBar(project_.BarAtBeat(beats)), int(systems_.size()) - 1);
         if (system != followSystem_) {
             followSystem_ = system;
             int ppuX, ppuY;
@@ -272,9 +543,12 @@ void ScoreCanvas::SetPlayhead(double beats, bool visible) {
     Refresh();
 }
 
-void ScoreCanvas::SetSelection(int bar, int staff) {
-    selectedBar_ = bar;
-    selectedStaff_ = staff;
+void ScoreCanvas::SetSelection(const BarRange& range) {
+    selection_ = range;
+    if (range.IsValid() && !dragging_) {
+        anchorBar_ = range.firstBar;
+        anchorStaff_ = range.firstStaff;
+    }
     Refresh();
 }
 
@@ -299,7 +573,6 @@ void ScoreCanvas::ComputeLayout() {
         double extra = 0;  // room for a dot or flag to the right
     };
     constexpr double kLead = 18, kAccidentalRoom = 14, kMinColumn = 17;
-    const double barBeats = BarBeats();
     const int perLine = project_.settings.barsPerLine;
 
     layout_.assign(BarCount(), BarLayout{});
@@ -325,10 +598,11 @@ void ScoreCanvas::ComputeLayout() {
             }
 
             leads[b] = kLead + (columns[b].begin()->second.accidental ? kAccidentalRoom : 0);
+            if (ShowsMeter(first + b)) leads[b] += 30;
             totalMin += leads[b];
             for (auto it = columns[b].begin(); it != columns[b].end(); ++it) {
                 const auto next = std::next(it);
-                const double nextBeat = next == columns[b].end() ? barBeats : next->first;
+                const double nextBeat = next == columns[b].end() ? BarBeats(first + b) : next->first;
                 double minimum = kMinColumn + it->second.extra;
                 if (next != columns[b].end() && next->second.accidental) minimum += kAccidentalRoom;
                 minimums[b].push_back(minimum);
@@ -374,7 +648,7 @@ double ScoreCanvas::BeatX(int bar, double beat) const {
     for (size_t i = 0; i < columns.size(); ++i) {
         const double startBeat = columns[i].first, startX = columns[i].second;
         const bool last = i + 1 == columns.size();
-        const double endBeat = last ? BarBeats() : columns[i + 1].first;
+        const double endBeat = last ? BarBeats(bar) : columns[i + 1].first;
         const double endX = last ? BarX(bar) + BarWidth(bar) : columns[i + 1].second;
         if (beat <= endBeat + kEps || last)
             return startX + (beat - startBeat) / (endBeat - startBeat) * (endX - startX);
@@ -495,13 +769,15 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
     const double lineEnd = BarX(endBar - 1) + BarWidth(endBar - 1);
 
     // Highlights go underneath the notation.
-    if (selectedBar_ >= firstBar && selectedBar_ < endBar) {
-        double y = firstTop - 10, height = lastBottom - firstTop + 20;
-        if (selectedStaff_ >= 0) {
-            y = StaffTop(system, selectedStaff_) - 10;
-            height = kStaffH + 20;
+    if (selection_.IsValid() && selection_.firstBar < endBar && selection_.lastBar >= firstBar) {
+        const int from = std::max(selection_.firstBar, firstBar);
+        const int to = std::min(selection_.lastBar, endBar - 1);
+        double y = firstTop - 10, bottom = lastBottom + 10;
+        if (selection_.firstStaff >= 0) {
+            y = StaffTop(system, selection_.firstStaff) - 10;
+            bottom = StaffTop(system, selection_.lastStaff) + kStaffH + 10;
         }
-        FillRound(gc, wxRect2DDouble(BarX(selectedBar_) + 1, y, BarWidth(selectedBar_) - 2, height), 3,
+        FillRound(gc, wxRect2DDouble(BarX(from) + 1, y, BarX(to) + BarWidth(to) - BarX(from) - 2, bottom - y), 3,
                   WithAlpha(kSelect, 42));
     }
     if (!preview_.empty()) {
@@ -519,7 +795,7 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
                 FillRound(gc, r, 4, WithAlpha(kProposal, 38));
                 StrokeRound(gc, r, 4, kProposal, 1.2);
                 if (!tagged) {
-                    const wxRect2DDouble tag(r.m_x, r.m_y + r.m_height + 2, 150, 19);
+                    const wxRect2DDouble tag(std::max(r.m_x, r.m_x + r.m_width - 150), r.m_y + r.m_height + 2, 150, 19);
                     FillRound(gc, tag, 3, kProposal);
                     DrawCentered(gc, "Director proposal", tag, UiFont(12, true), *wxWHITE);
                     tagged = true;
@@ -558,6 +834,14 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
         }
 
         for (int bar = firstBar; bar < endBar; ++bar) {
+            if (ShowsMeter(bar)) {
+                int meterTop, meterBottom;
+                project_.MeterAt(bar, meterTop, meterBottom);
+                const wxFont digit = SerifFont(20, true);
+                const double digitX = BarX(bar) + 5;
+                DrawCentered(gc, wxString::Format("%d", meterTop), wxRect2DDouble(digitX, top - 1, 22, 16), digit, kInk);
+                DrawCentered(gc, wxString::Format("%d", meterBottom), wxRect2DDouble(digitX, top + 15, 22, 16), digit, kInk);
+            }
             const bool proposed = IsProposalBar(staff, bar);
             DrawEvents(gc, EventsFor(staff, bar), bar, top, proposed ? kProposal : kInk);
         }
@@ -594,10 +878,30 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
         DrawCentered(gc, section.label, mark, SerifFont(16, true), kInk);
     }
 
-    for (const Marking& m : project_.markings) {
+    for (const Marking& m : EffectiveMarkings()) {
         if (m.bar < firstBar || m.bar >= endBar || m.staff >= staves) continue;
         DrawTextAt(gc, m.text, BeatX(m.bar, m.beat) - 5, StaffTop(system, m.staff) + kStaffH + 16,
-                   SerifFont(16, true, true), kInk);
+                   SerifFont(16, true, true), m.proposed ? kProposal : kInk);
+    }
+
+    for (const Hairpin& h : EffectiveHairpins()) {
+        if (h.bar >= endBar || h.endBar < firstBar || h.staff >= staves || h.endBar >= BarCount()) continue;
+        const wxColour& ink = h.proposed ? kProposal : kInk;
+        const double y = StaffTop(system, h.staff) + kStaffH + 25;
+        double x1 = h.bar >= firstBar ? BeatX(h.bar, h.beat) : BarX(firstBar);
+        // Start clear of a dynamic written at the same spot.
+        for (const Marking& m : EffectiveMarkings())
+            if (m.staff == h.staff && m.bar == h.bar && std::abs(m.beat - h.beat) < kEps && h.bar >= firstBar) x1 += 22;
+        const double x2 = h.endBar < endBar ? BeatX(h.endBar, h.endBeat) - 4 : lineEnd - 2;
+
+        // A hairpin split across lines opens partway on each one.
+        const double span = h.endBar - h.bar + 1;
+        const double from = h.bar >= firstBar ? 0 : (firstBar - h.bar) / span;
+        const double to = h.endBar < endBar ? 1 : (endBar - h.bar) / span;
+        const double open1 = (h.crescendo ? from : 1 - from) * 6;
+        const double open2 = (h.crescendo ? to : 1 - to) * 6;
+        Line(gc, x1, y - open1, x2, y - open2, ink, 1.2);
+        Line(gc, x1, y + open1, x2, y + open2, ink, 1.2);
     }
 
     for (const Slur& slur : project_.slurs) {
@@ -620,17 +924,17 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
             const double x = BeatX(caret_.bar, caret_.beat);
             FillRound(gc, wxRect2DDouble(x - 11, top - 12, 22, kStaffH + 24), 3, WithAlpha(kSelect, 46));
             Line(gc, x - 11, top - 12, x - 11, top + kStaffH + 12, kSelect, 2);
-            if (hover_.bar < 0) DrawGhost(gc, x, top, caret_.step, WrittenLength(caret_.beat));
+            if (hover_.bar < 0) DrawGhost(gc, x, top, caret_.step, WrittenLength(caret_.bar, caret_.beat));
         }
         if (hover_.bar >= firstBar && hover_.bar < endBar)
             DrawGhost(gc, BeatX(hover_.bar, hover_.beat), StaffTop(system, hover_.staff), hover_.step,
-                      WrittenLength(hover_.beat));
+                      WrittenLength(hover_.bar, hover_.beat));
     }
 
     if (playheadVisible_) {
-        const int bar = std::min(int(playhead_ / BarBeats()), BarCount() - 1);
+        const int bar = project_.BarAtBeat(playhead_);
         if (bar >= firstBar && bar < endBar) {
-            const double x = BeatX(bar, playhead_ - bar * BarBeats()) - 2;
+            const double x = BeatX(bar, playhead_ - project_.BarStart(bar)) - 2;
             FillRound(gc, wxRect2DDouble(x - 5, firstTop - 18, 12, lastBottom - firstTop + 36), 3,
                       WithAlpha(kAccent, 60));
             Line(gc, x, firstTop - 18, x, lastBottom + 18, kAccent, 2.2);
@@ -698,7 +1002,7 @@ void ScoreCanvas::DrawEvents(wxGraphicsContext& gc, const std::vector<Event>& ev
         beat += ev.beats;
         if (ev.rest) {
             // A whole-bar rest is centred in the bar.
-            const bool fullBar = ev.beats >= BarBeats() - kEps;
+            const bool fullBar = ev.beats >= BarBeats(bar) - kEps;
             DrawRest(gc, fullBar ? BarX(bar) + BarWidth(bar) / 2 : p.x, top, fullBar ? 4 : ev.beats, ink);
             continue;
         }
@@ -746,7 +1050,7 @@ void ScoreCanvas::DrawEvents(wxGraphicsContext& gc, const std::vector<Event>& ev
         gc.FillPath(beam);
     };
 
-    const double beamUnit = project_.settings.BeamUnit();
+    const double beamUnit = project_.BeamUnit(bar);
     for (size_t i = 0; i < events.size();) {
         const Event& ev = events[i];
         if (ev.rest || ev.beats >= 4) {
@@ -838,6 +1142,22 @@ void ScoreCanvas::DrawEvents(wxGraphicsContext& gc, const std::vector<Event>& ev
         }
         i = end;
     }
+
+    for (size_t i = 0; i < events.size(); ++i) {
+        const Event& ev = events[i];
+        if (ev.rest || ev.articulations.empty()) continue;
+        const Placed& p = placed[i];
+        const double dir = p.up ? 1 : -1;
+        double y = (p.up ? p.loY : p.hiY) + dir * 11;
+        for (char code : ev.articulations) {
+            if (code == 'f') {
+                DrawArticulation(gc, p.x, std::min(top - 8, p.hiY - 12), code, false, ink);
+                continue;
+            }
+            DrawArticulation(gc, p.x, y, code, p.up, ink);
+            y += dir * 9;
+        }
+    }
 }
 
 void ScoreCanvas::OnLeftDown(wxMouseEvent& event) {
@@ -848,27 +1168,61 @@ void ScoreCanvas::OnLeftDown(wxMouseEvent& event) {
         return;
     }
 
+    int hitBar = -1, hitStaff = -1;
+    BarRange range;
+    if (HitBar(event.GetPosition(), hitBar, hitStaff)) {
+        if (!event.ShiftDown() || anchorBar_ < 0) {
+            anchorBar_ = hitBar;
+            anchorStaff_ = hitStaff;
+        }
+        range = MakeBarRange(anchorBar_, anchorStaff_, hitBar, hitStaff);
+        dragging_ = true;
+    } else {
+        anchorBar_ = anchorStaff_ = -1;
+        dragging_ = false;
+    }
+    const bool held = dragging_;
+    dragging_ = true;  // keeps SetSelection from moving the anchor
+    SetSelection(range);
+    dragging_ = held;
+    if (onSelect) onSelect(range);
+}
+
+bool ScoreCanvas::HitBar(const wxPoint& client, int& bar, int& staff) const {
     double x, y;
     int page;
-    int hitBar = -1, hitStaff = -1;
-    if (ToPage(event.GetPosition(), x, y, page)) {
-        for (int system = 0; system < int(systems_.size()) && hitBar < 0; ++system) {
-            if (systems_[system].page != page) continue;
-            for (int staff = 0; staff < StaffCount(); ++staff) {
-                const double top = StaffTop(system, staff);
-                if (y < top - 16 || y > top + kStaffH + 16) continue;
-                hitBar = BarAtX(system, x);
-                if (hitBar >= 0) hitStaff = staff;
-                break;
-            }
+    if (!ToPage(client, x, y, page)) return false;
+    for (int system = 0; system < int(systems_.size()); ++system) {
+        if (systems_[system].page != page) continue;
+        for (int s = 0; s < StaffCount(); ++s) {
+            const double top = StaffTop(system, s);
+            if (y < top - 16 || y > top + kStaffH + 16) continue;
+            const int hit = BarAtX(system, x);
+            if (hit < 0) return false;
+            bar = hit;
+            staff = s;
+            return true;
         }
     }
-    SetSelection(hitBar, hitStaff);
-    if (onSelect) onSelect(hitBar, hitStaff);
+    return false;
 }
 
 void ScoreCanvas::OnMotion(wxMouseEvent& event) {
-    if (!noteInput_) return;
+    if (!noteInput_) {
+        // Dragging extends the selection from where the press landed.
+        int bar, staff;
+        if (dragging_ && event.LeftIsDown() && HitBar(event.GetPosition(), bar, staff)) {
+            const BarRange range = MakeBarRange(anchorBar_, anchorStaff_, bar, staff);
+            if (range.firstBar != selection_.firstBar || range.lastBar != selection_.lastBar ||
+                range.firstStaff != selection_.firstStaff || range.lastStaff != selection_.lastStaff) {
+                SetSelection(range);
+                if (onSelect) onSelect(range);
+            }
+        } else if (!event.LeftIsDown()) {
+            dragging_ = false;
+        }
+        return;
+    }
     Target t;
     if (!HitTest(event.GetPosition(), t)) t = Target{};
     if (t.bar != hover_.bar || t.staff != hover_.staff || t.step != hover_.step ||
@@ -912,7 +1266,7 @@ bool ScoreCanvas::HitTest(const wxPoint& client, Target& out) const {
             const double grid = SnapGrid(inputBeats_);
             double nearest = 1e9;
             out.beat = 0;
-            for (double beat = 0; beat < BarBeats() - kEps; beat += grid) {
+            for (double beat = 0; beat < BarBeats(bar) - kEps; beat += grid) {
                 const double gap = std::abs(BeatX(bar, beat) - x);
                 if (gap < nearest) {
                     nearest = gap;
@@ -924,8 +1278,8 @@ bool ScoreCanvas::HitTest(const wxPoint& client, Target& out) const {
     return found;
 }
 
-double ScoreCanvas::WrittenLength(double beat) const {
-    return LargestValueWithin(std::min(inputBeats_, BarBeats() - beat));
+double ScoreCanvas::WrittenLength(int bar, double beat) const {
+    return LargestValueWithin(std::min(inputBeats_, BarBeats(bar) - beat));
 }
 
 bool ScoreCanvas::CanEdit(int staff, int bar) {
@@ -937,7 +1291,7 @@ bool ScoreCanvas::CanEdit(int staff, int bar) {
 }
 
 void ScoreCanvas::PushUndo() {
-    undo_.push_back(score_);
+    undo_.push_back(Capture());
     redo_.clear();
 }
 
@@ -970,7 +1324,7 @@ void ScoreCanvas::WriteRange(int staff, int bar, double start, double length, co
               [](const auto& a, const auto& b) { return a.first < b.first; });
 
     if (notes.empty()) {
-        score_[staff][bar] = FullBarRest(BarBeats());
+        score_[staff][bar] = FullBarRest(BarBeats(bar));
         return;
     }
 
@@ -996,13 +1350,36 @@ void ScoreCanvas::WriteRange(int staff, int bar, double start, double length, co
         cursor = entry.first + entry.second.beats;
         rebuilt.push_back(std::move(entry.second));
     }
-    restsUpTo(BarBeats());
+    restsUpTo(BarBeats(bar));
     score_[staff][bar] = std::move(rebuilt);
 }
 
 void ScoreCanvas::ClickNote(const Target& t) {
+    if (!pendingDynamic_.empty()) {
+        PushUndo();
+        ToggleDynamic(t.staff, t.bar, t.beat, pendingDynamic_);
+        ClearPendingMark();
+        Changed();
+        return;
+    }
     if (!CanEdit(t.staff, t.bar)) return;
-    const double length = WrittenLength(t.beat);
+    if (pendingArticulation_) {
+        // On an existing note, the mark is added to or taken off that note.
+        double at = 0;
+        for (Event& ev : score_[t.staff][t.bar]) {
+            if (std::abs(at - t.beat) < kEps && !ev.rest) {
+                PushUndo();
+                const size_t found = ev.articulations.find(pendingArticulation_);
+                if (found == std::string::npos) ev.articulations += pendingArticulation_;
+                else ev.articulations.erase(found, 1);
+                ClearPendingMark();
+                Changed();
+                return;
+            }
+            at += ev.beats;
+        }
+    }
+    const double length = WrittenLength(t.bar, t.beat);
     PushUndo();
 
     if (inputRest_) {
@@ -1037,12 +1414,14 @@ void ScoreCanvas::ClickNote(const Target& t) {
             note.beats = length;
             note.steps = {t.step};
             note.accidentals = {inputAccidental_};
+            if (pendingArticulation_) note.articulations = std::string(1, pendingArticulation_);
             WriteRange(t.staff, t.bar, t.beat, length, &note);
             PreviewNote(t.staff, t.bar, t.beat, t.step);
         }
     }
 
     if (inputAccidental_ && onAccidentalUsed) onAccidentalUsed();
+    ClearPendingMark();
     caret_ = t;
     lastEntered_ = Target{};
     AdvanceCaret(length);
@@ -1051,7 +1430,7 @@ void ScoreCanvas::ClickNote(const Target& t) {
 
 void ScoreCanvas::WriteAtCaret(const Event* note, int step) {
     if (!CanEdit(caret_.staff, caret_.bar)) return;
-    const double length = WrittenLength(caret_.beat);
+    const double length = WrittenLength(caret_.bar, caret_.beat);
     PushUndo();
     Event written;
     if (note) {
@@ -1068,7 +1447,7 @@ void ScoreCanvas::WriteAtCaret(const Event* note, int step) {
 
 void ScoreCanvas::AdvanceCaret(double beats) {
     double next = caret_.beat + beats;
-    if (next >= BarBeats() - kEps) {
+    if (next >= BarBeats(caret_.bar) - kEps) {
         if (caret_.bar + 1 >= BarCount()) {
             if (onInputStatus) onInputStatus("End of the score");
             Refresh();
@@ -1103,13 +1482,14 @@ void ScoreCanvas::EnsureCaretVisible() {
 void ScoreCanvas::SetNoteInput(bool on) {
     if (on == noteInput_) return;
     noteInput_ = on;
+    if (!on) ClearPendingMark();
     hover_ = Target{};
     lastEntered_ = Target{};
     SetCursor(on ? wxCURSOR_CROSS : wxCURSOR_ARROW);
     if (on) {
         caret_ = Target{};
-        caret_.bar = selectedBar_ >= 0 ? selectedBar_ : 0;
-        caret_.staff = selectedStaff_ >= 0 ? selectedStaff_ : 0;
+        caret_.bar = selection_.IsValid() ? selection_.firstBar : 0;
+        caret_.staff = selection_.firstStaff >= 0 ? selection_.firstStaff : 0;
         caret_.beat = 0;
         caret_.step = -2;
         SetFocus();
@@ -1129,6 +1509,11 @@ void ScoreCanvas::SetInputValue(double beats, bool rest, char accidental) {
 }
 
 void ScoreCanvas::TypePitch(char letter) {
+    if (!pendingDynamic_.empty()) {
+        PushUndo();
+        ToggleDynamic(caret_.staff, caret_.bar, caret_.beat, pendingDynamic_);
+        ClearPendingMark();
+    }
     // C=0 ... B=6, relative to the note on each clef's middle line.
     const int index = int(std::string("CDEFGAB").find(letter));
     const int middle = MiddleLine(project_.staves[caret_.staff].clef) % 7;
@@ -1150,9 +1535,11 @@ void ScoreCanvas::TypePitch(char letter) {
     Event note;
     note.steps = {step};
     note.accidentals = {inputAccidental_};
+    if (pendingArticulation_) note.articulations = std::string(1, pendingArticulation_);
     caret_.step = step;
     WriteAtCaret(&note, step);
     if (inputAccidental_ && onAccidentalUsed) onAccidentalUsed();
+    ClearPendingMark();
 }
 
 void ScoreCanvas::TypeRest() { WriteAtCaret(nullptr, 0); }
@@ -1249,8 +1636,8 @@ void ScoreCanvas::DeleteAtCaret() {
 
 void ScoreCanvas::Undo() {
     if (undo_.empty()) return;
-    redo_.push_back(std::move(score_));
-    score_ = std::move(undo_.back());
+    redo_.push_back(Capture());
+    Restore(std::move(undo_.back()));
     undo_.pop_back();
     lastEntered_ = Target{};
     Changed();
@@ -1258,29 +1645,94 @@ void ScoreCanvas::Undo() {
 
 void ScoreCanvas::Redo() {
     if (redo_.empty()) return;
-    undo_.push_back(std::move(score_));
-    score_ = std::move(redo_.back());
+    undo_.push_back(Capture());
+    Restore(std::move(redo_.back()));
     redo_.pop_back();
     lastEntered_ = Target{};
     Changed();
 }
 
+std::vector<double> ScoreCanvas::ClickBeats() const {
+    std::vector<double> beats;
+    for (int bar = 0; bar < BarCount(); ++bar) {
+        const double start = project_.BarStart(bar), unit = project_.BeatUnit(bar), length = BarBeats(bar);
+        for (double at = 0; at < length - kEps; at += unit) beats.push_back(start + at);
+    }
+    return beats;
+}
+
 std::vector<PlayNote> ScoreCanvas::BuildPlayback() const {
     std::vector<PlayNote> notes;
     const int fifths = project_.settings.fifths;
+
+    const auto levelOf = [](const wxString& text) {
+        if (text == "pp") return 0.25;
+        if (text == "p") return 0.4;
+        if (text == "mp") return 0.55;
+        if (text == "mf") return 0.7;
+        if (text == "f") return 0.85;
+        if (text == "ff") return 1.0;
+        return 0.7;
+    };
+
     for (int staff = 0; staff < StaffCount(); ++staff) {
         const StaffDef& def = project_.staves[staff];
+
+        std::vector<std::pair<double, double>> levels;  // position -> loudness
+        for (const Marking& m : EffectiveMarkings())
+            if (m.staff == staff && m.bar < BarCount()) levels.emplace_back(project_.BarStart(m.bar) + m.beat, levelOf(m.text));
+        std::sort(levels.begin(), levels.end());
+        const auto baseAt = [&](double pos) {
+            double level = 0.7;
+            for (const auto& entry : levels)
+                if (entry.first <= pos + kEps) level = entry.second;
+            return level;
+        };
+
+        struct Span { double start, end, from, to; };
+        std::vector<Span> spans;
+        for (const Hairpin& h : EffectiveHairpins()) {
+            if (h.staff != staff || h.endBar >= BarCount()) continue;
+            const double start = project_.BarStart(h.bar) + h.beat;
+            const double end = project_.BarStart(h.endBar) + h.endBeat;
+            const double from = baseAt(start);
+            // Head for the dynamic that follows, or a modest change if none does.
+            double to = std::clamp(from + (h.crescendo ? 0.25 : -0.25), 0.15, 1.0);
+            for (const auto& entry : levels) {
+                if (entry.first >= end - kEps && entry.first <= end + 0.5) {
+                    to = entry.second;
+                    break;
+                }
+            }
+            if (end > start) spans.push_back({start, end, from, to});
+        }
+        const auto levelAt = [&](double pos) {
+            for (const Span& span : spans)
+                if (pos >= span.start - kEps && pos < span.end)
+                    return span.from + (span.to - span.from) * (pos - span.start) / (span.end - span.start);
+            return baseAt(pos);
+        };
+
         for (int bar = 0; bar < BarCount(); ++bar) {
             // An accidental lasts until the end of its bar.
             std::map<int, char> alterations;
-            double pos = bar * BarBeats();
+            double pos = project_.BarStart(bar);
             for (const Event& ev : EventsFor(staff, bar)) {
                 if (!ev.rest) {
+                    const auto has = [&](char code) { return ev.articulations.find(code) != std::string::npos; };
+                    double length = ev.beats;
+                    double level = levelAt(pos);
+                    if (has('.')) length *= 0.5;
+                    if (has('-')) length /= 0.95;  // the engine trims notes slightly by default
+                    if (has('^')) { length *= 0.8; level += 0.2; }
+                    if (has('>')) level += 0.15;
+                    level = std::clamp(level, 0.1, 1.0);
+
                     for (size_t n = 0; n < ev.steps.size(); ++n) {
                         if (ev.accidentals[n]) alterations[ev.steps[n]] = ev.accidentals[n];
                         const auto it = alterations.find(ev.steps[n]);
                         const char accidental = it == alterations.end() ? char(0) : it->second;
-                        notes.push_back({def.track, pos, ev.beats, StepToMidi(def.clef, fifths, ev.steps[n], accidental)});
+                        notes.push_back({def.track, pos, length, StepToMidi(def.clef, fifths, ev.steps[n], accidental), float(level)});
                     }
                 }
                 pos += ev.beats;
@@ -1308,7 +1760,7 @@ double ScoreCanvas::FilledFraction(int staff, int bar) const {
     double beats = 0;
     for (const Event& ev : score_[staff][bar])
         if (!ev.rest) beats += ev.beats;
-    return beats / BarBeats();
+    return beats / BarBeats(bar);
 }
 
 void ScoreCanvas::DrawGhost(wxGraphicsContext& gc, double x, double top, int step, double beats) {

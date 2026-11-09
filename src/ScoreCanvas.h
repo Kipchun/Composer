@@ -22,11 +22,15 @@ public:
     // Changes tempo, key, meter and so on; notes that no longer fit are removed.
     void ApplySettings(const ProjectSettings& settings);
     bool WouldLoseNotes(const ProjectSettings& settings) const;
+    // A time signature from `bar` until the next change. Undoable.
+    void SetMeterChange(int bar, int top, int bottom);
+    bool WouldMeterLoseNotes(int bar, int top, int bottom) const;
 
     int BarCount() const { return project_.settings.bars; }
     int StaffCount() const { return int(project_.staves.size()); }
-    double BarBeats() const { return project_.settings.BarBeats(); }
-    double TotalBeats() const { return BarCount() * BarBeats(); }
+    double BarBeats(int bar) const { return project_.BarBeats(bar); }
+    double TotalBeats() const { return project_.TotalBeats(); }
+    std::vector<double> ClickBeats() const;
     wxString StaffName(int staff) const;
 
     // Preview draws and plays the proposal without changing the score.
@@ -36,15 +40,23 @@ public:
     bool IsProposalStale(const Proposal& proposal) const;
     bool IsProposalBar(int staff, int bar) const;  // shown in the current preview
     void SetPlayhead(double beats, bool visible);
-    void SetSelection(int bar, int staff);  // staff -1 selects the whole bar
+    void SetSelection(const BarRange& range);
+    const BarRange& GetSelection() const { return selection_; }
     void SetZoom(double zoom);
     double GetZoom() const { return zoom_; }
 
-    std::function<void(int bar, int staff)> onSelect;
+    std::function<void(const BarRange&)> onSelect;
     std::function<void(double zoom)> onZoom;
 
     // Note input mode. The value is what the next note will be written as.
     bool IsNoteInput() const { return noteInput_; }
+    // In note input, the next note or click takes this mark. Pass 0 and empty to clear.
+    void SetPendingMark(char articulation, const wxString& dynamic);
+    // These act on the selected bars and return false if there's nothing to act on.
+    bool ApplyDynamicToSelection(const wxString& dynamic);
+    bool ApplyHairpinToSelection(bool crescendo);
+    bool ToggleArticulationInSelection(char articulation);
+    std::function<void()> onMarkUsed;
     void SetNoteInput(bool on);
     void SetInputValue(double beats, bool rest, char accidental);
     void TypePitch(char letter);
@@ -90,8 +102,16 @@ private:
     void OnMotion(wxMouseEvent&);
 
     bool HitTest(const wxPoint& client, Target& out) const;
+    bool HitBar(const wxPoint& client, int& bar, int& staff) const;
+    bool ShowsMeter(int bar) const;
+    void ClearPreview();
+    void FitMarksToBars();
+    void ClearPendingMark();
+    void ToggleDynamic(int staff, int bar, double beat, const wxString& dynamic);
+    const std::vector<Marking>& EffectiveMarkings() const { return hasMarkPreview_ ? previewMarkings_ : project_.markings; }
+    const std::vector<Hairpin>& EffectiveHairpins() const { return hasMarkPreview_ ? previewHairpins_ : project_.hairpins; }
     bool ToPage(const wxPoint& client, double& x, double& y, int& page) const;
-    double WrittenLength(double beat) const;
+    double WrittenLength(int bar, double beat) const;
     bool CanEdit(int staff, int bar);
     void PushUndo();
     void WriteRange(int staff, int bar, double start, double length, const Event* note);
@@ -136,15 +156,30 @@ private:
     std::vector<double> staffOffset_;
     double systemH_ = 0, pageH_ = 0;
     int pageCount_ = 1;
-    std::vector<Score> undo_, redo_;
+    struct Snapshot {
+        Score score;
+        std::vector<MeterChange> meters;
+        std::vector<Marking> markings;
+        std::vector<Hairpin> hairpins;
+        int timeTop = 4, timeBottom = 4;
+    };
+    Snapshot Capture() const;
+    void Restore(Snapshot snapshot);
+    std::vector<Snapshot> undo_, redo_;
     std::map<std::pair<int, int>, Bar> preview_;  // (staff, bar) -> proposed contents
+    bool hasMarkPreview_ = false;
+    std::vector<Marking> previewMarkings_;
+    std::vector<Hairpin> previewHairpins_;
 
     double zoom_ = 0.8;
     double playhead_ = 0;
     bool playheadVisible_ = false;
     int followSystem_ = -1;
-    int selectedBar_ = -1;
-    int selectedStaff_ = -1;
+    BarRange selection_;
+    int anchorBar_ = -1, anchorStaff_ = -1;
+    bool dragging_ = false;
+    char pendingArticulation_ = 0;
+    wxString pendingDynamic_;
 
     bool noteInput_ = false;
     double inputBeats_ = 1;

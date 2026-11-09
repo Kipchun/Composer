@@ -5,4 +5,5 @@ struct PlayNote {
     int staff;
     double beat, length;
     int midi;
+    float velocity = 0.7f;
 };

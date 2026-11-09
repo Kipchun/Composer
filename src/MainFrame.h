@@ -27,7 +27,9 @@ private:
     void OnTransport(TransportBar::Action action);
     void OnTick(wxTimerEvent&);
     void Publish();
-    void Select(int bar, int staff);
+    void Select(const BarRange& range);
+    void ChangeMeter();
+    void OnPaletteMark(char articulation, const wxString& dynamic, int hairpin);
     void OnCharHook(wxKeyEvent& event);
     void SyncInputValue();
     void PushSchedule();

@@ -21,9 +21,12 @@ public:
     void ToggleDot();
     void SetAccidental(char accidental);
     void ClearAccidental();
+    void ClearMarks();  // articulation and dynamics buttons
 
     std::function<void(const wxString& tool)> onTool;
     std::function<void()> onNoteInputChanged;
+    // Exactly one is set, or none when a button is turned off. hairpin: 1 crescendo, -1 diminuendo.
+    std::function<void(char articulation, const wxString& dynamic, int hairpin)> onMark;
 
 private:
     enum class Face { Music, Serif, Plain };
