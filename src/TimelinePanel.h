@@ -1,16 +1,19 @@
-// Bottom overview: form sections and a block per bar for each instrument.
+// Bottom overview: rehearsal sections and a block per bar for each staff.
 #pragma once
+
+#include <wx/scrolwin.h>
 
 #include <functional>
 
 #include "ScoreCanvas.h"
 #include "Theme.h"
 
-class TimelinePanel : public wxPanel {
+class TimelinePanel : public wxScrolledCanvas {
 public:
     explicit TimelinePanel(wxWindow* parent);
 
-    void SetScore(const ScoreCanvas* score) { score_ = score; }
+    void SetScore(const ScoreCanvas* score);
+    void ScoreChanged();  // the project's shape may have changed too
     void SetSelection(int bar, int staff);
     void SetPlayhead(double beats, bool visible);
     void SetProposal(ProposalState state);

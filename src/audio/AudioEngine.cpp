@@ -219,7 +219,7 @@ void AudioEngine::Mix() {
 }
 
 void AudioEngine::AddClick(int64_t start) {
-    const double perBeat = SamplesPerBeat();
+    const double perBeat = SamplesPerBeat() * clickUnit_;
     const int64_t beat = int64_t(std::ceil(start / perBeat));
     const int64_t clickAt = int64_t(std::llround(beat * perBeat));
     const int startFrame = clickAt < start + kBlock ? int(clickAt - start) : kBlock;
@@ -243,6 +243,7 @@ void AudioEngine::AddClick(int64_t start) {
 std::unique_ptr<Instrument> AudioEngine::SetInstrument(int track,
                                                        std::unique_ptr<Instrument> instrument) {
     std::lock_guard<std::mutex> guard(lock_);
+    if (instrument) instrument->SetTempo(tempo_);
     std::swap(instruments_[track], instrument);
     active_[track].fill(false);
     return instrument;
@@ -312,6 +313,20 @@ void AudioEngine::SetLoop(bool on) {
 void AudioEngine::SetClick(bool on) {
     std::lock_guard<std::mutex> guard(lock_);
     click_ = on;
+}
+
+void AudioEngine::SetTempo(double quartersPerMinute) {
+    std::lock_guard<std::mutex> guard(lock_);
+    // Stay at the same musical position when the speed changes.
+    position_ = int64_t(position_ * tempo_ / quartersPerMinute);
+    tempo_ = quartersPerMinute;
+    for (auto& instrument : instruments_)
+        if (instrument) instrument->SetTempo(tempo_);
+}
+
+void AudioEngine::SetClickUnit(double quarters) {
+    std::lock_guard<std::mutex> guard(lock_);
+    clickUnit_ = quarters;
 }
 
 void AudioEngine::Preview(int track, int pitch) {

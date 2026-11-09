@@ -14,16 +14,17 @@ struct Timbre {
     double decaySeconds;
 };
 
-// Flute, oboe, violin, cello, piano RH, piano LH.
+// Indexed by the Timbre enum in Project.h.
 const Timbre kTimbres[] = {
     {0.25, 0.05, 0.75, 0.3}, {0.7, 0.5, 0.75, 0.2}, {0.5, 0.3, 0.8, 0.4},
     {0.6, 0.3, 0.8, 0.4},    {0.45, 0.15, 0.0, 1.4}, {0.45, 0.15, 0.0, 1.8},
+    {0.7, 0.55, 0.85, 0.4},  {0.3, 0.1, 0.0, 0.9},   {0.2, 0.05, 0.0, 0.7},
 };
 
 class PlaceholderSynth : public Instrument {
 public:
-    PlaceholderSynth(int staff, double sampleRate)
-        : timbre_(kTimbres[std::clamp(staff, 0, 5)]), sampleRate_(sampleRate), voices_(24) {}
+    PlaceholderSynth(int timbre, double sampleRate)
+        : timbre_(kTimbres[std::clamp(timbre, 0, 8)]), sampleRate_(sampleRate), voices_(24) {}
 
     void Process(const MidiEvent* events, int count, float* left, float* right,
                  int frames) override {
@@ -96,6 +97,6 @@ private:
 
 }  // namespace
 
-std::unique_ptr<Instrument> MakePlaceholder(int staff, double sampleRate) {
-    return std::make_unique<PlaceholderSynth>(staff, sampleRate);
+std::unique_ptr<Instrument> MakePlaceholder(int timbre, double sampleRate) {
+    return std::make_unique<PlaceholderSynth>(timbre, sampleRate);
 }

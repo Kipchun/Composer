@@ -17,7 +17,8 @@ class DirectorPanel : public wxPanel {
 public:
     explicit DirectorPanel(wxWindow* parent);
 
-    void SetScope(int bar, int staff);
+    void SetScope(int bar, const wxString& staffName);
+    void ResetConversation(const wxString& projectTitle);
 
     std::function<void(ProposalState)> onProposal;
 

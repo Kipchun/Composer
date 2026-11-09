@@ -32,6 +32,13 @@ public:
         ScrollToEnd();
     }
 
+    void Clear() {
+        messages_.clear();
+        cardState_ = CardState::Pending;
+        SetThinking(false);
+        Scroll(0, 0);
+    }
+
     void SetThinking(bool thinking) {
         thinking_ = thinking;
         if (thinking) dots_.Start(280);
@@ -409,14 +416,21 @@ DirectorPanel::DirectorPanel(wxWindow* parent) : wxPanel(parent), replyTimer_(th
     replyTimer_.Bind(wxEVT_TIMER, [this](wxTimerEvent&) { Reply(); });
 }
 
-void DirectorPanel::SetScope(int bar, int staff) {
+void DirectorPanel::SetScope(int bar, const wxString& staffName) {
     if (bar < 0) {
         scope_ = "Entire score";
     } else {
         scope_ = wxString::Format("Bar %d", bar + 1);
-        if (staff >= 0) scope_ += " " + Glyph(0x00B7) + " " + ScoreCanvas::StaffName(staff);
+        if (!staffName.empty()) scope_ += " " + Glyph(0x00B7) + " " + staffName;
     }
     footer_->SetScope(scope_);
+}
+
+void DirectorPanel::ResetConversation(const wxString& projectTitle) {
+    replyTimer_.Stop();
+    chat_->Clear();
+    chat_->Add(false, "Ready to work on " + projectTitle + ". Tell me what you'd like to change.");
+    SetScope(-1, "");
 }
 
 void DirectorPanel::Send(const wxString& text) {

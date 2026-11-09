@@ -56,6 +56,8 @@ add_executable(Composer WIN32
     src/TimelinePanel.cpp
     src/DirectorPanel.cpp
     src/InstrumentsWindow.cpp
+    src/Project.cpp
+    src/ProjectDialogs.cpp
     src/audio/AudioEngine.cpp
     src/audio/PlaceholderSynth.cpp
     src/audio/Vst3Host.cpp

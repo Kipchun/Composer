@@ -8,13 +8,14 @@
 
 class TransportBar : public wxPanel {
 public:
-    enum Action { Rewind, Play, Stop, Record, Loop, Click, ZoomOut, ZoomIn, ViewScore, ViewParts, ViewRoll };
+    enum Action { Rewind, Play, Stop, Record, Loop, Click, ZoomOut, ZoomIn, ViewScore, ViewParts, ViewRoll, OpenSettings };
 
     explicit TransportBar(wxWindow* parent);
 
     void SetPlaying(bool playing);
     void SetPosition(int bar, int beat);
     void SetZoomPercent(int percent);
+    void SetProjectInfo(int tempo, const wxString& key, const wxString& time);
     bool IsLooping() const { return loop_; }
     bool IsClickOn() const { return click_; }
 
@@ -40,4 +41,6 @@ private:
     bool playing_ = false, loop_ = false, click_ = false, recording_ = false;
     int bar_ = 1, beat_ = 1, zoom_ = 80, hover_ = -1;
     Action view_ = ViewScore;
+    int tempoValue_ = 96;
+    wxString keyLabel_, timeLabel_ = "4/4";
 };

@@ -1,4 +1,4 @@
-// The engraved page: draws a hard-coded mock score and handles bar selection.
+// The engraved pages: draws the project's score and handles selection and note input.
 #pragma once
 
 #include <wx/scrolwin.h>
@@ -6,6 +6,7 @@
 #include <functional>
 #include <vector>
 
+#include "Project.h"
 #include "Theme.h"
 #include "audio/PlayNote.h"
 
@@ -13,10 +14,19 @@ enum class ProposalState { None, Preview, Applied };
 
 class ScoreCanvas : public wxScrolledCanvas {
 public:
-    static constexpr int kBars = 8;
-    static constexpr int kBeatsPerBar = 4;
-
     explicit ScoreCanvas(wxWindow* parent);
+
+    void SetProject(const Project& project);
+    const Project& GetProject() const { return project_; }
+    // Changes tempo, key, meter and so on; notes that no longer fit are removed.
+    void ApplySettings(const ProjectSettings& settings);
+    bool WouldLoseNotes(const ProjectSettings& settings) const;
+
+    int BarCount() const { return project_.settings.bars; }
+    int StaffCount() const { return int(project_.staves.size()); }
+    double BarBeats() const { return project_.settings.BarBeats(); }
+    double TotalBeats() const { return BarCount() * BarBeats(); }
+    wxString StaffName(int staff) const;
 
     void SetProposal(ProposalState state);
     void SetPlayhead(double beats, bool visible);
@@ -26,8 +36,6 @@ public:
 
     std::function<void(int bar, int staff)> onSelect;
     std::function<void(double zoom)> onZoom;
-
-    static wxString StaffName(int staff);
 
     // Note input mode. The value is what the next note will be written as.
     bool IsNoteInput() const { return noteInput_; }
@@ -45,20 +53,18 @@ public:
 
     double FilledFraction(int staff, int bar) const;
     std::vector<PlayNote> BuildPlayback() const;
-    static double TotalBeats() { return kBars * kBeatsPerBar; }
 
     std::function<void()> onChanged;
-    std::function<void(int staff, int midi)> onNotePreview;
+    std::function<void(int track, int midi)> onNotePreview;
     std::function<void()> onAccidentalUsed;
     std::function<void(const wxString&)> onInputStatus;
 
 private:
-    struct Event {
-        double beats = 1;
-        bool dotted = false;
-        bool rest = false;
-        std::vector<int> steps;  // diatonic steps from the staff's middle line
-        std::vector<char> accidentals;  // parallel to steps; 0 means none
+    using Event = ::Event;
+
+    struct Target {
+        int bar = -1, staff = -1, step = 0;
+        double beat = 0;
     };
 
     // Horizontal layout of one bar. Columns are shared by every staff.
@@ -67,12 +73,9 @@ private:
         std::vector<std::pair<double, double>> columns;  // beat -> x
     };
 
-    using Bar = std::vector<Event>;
-    using Score = std::vector<std::vector<Bar>>;  // staff -> bar -> events
-
-    struct Target {
-        int bar = -1, staff = -1, step = 0;
-        double beat = 0;
+    struct System {
+        int firstBar = 0, barCount = 0, page = 0;
+        double top = 0;
     };
 
     void OnPaint(wxPaintEvent&);
@@ -81,8 +84,10 @@ private:
     void OnMotion(wxMouseEvent&);
 
     bool HitTest(const wxPoint& client, Target& out) const;
+    bool ToPage(const wxPoint& client, double& x, double& y, int& page) const;
     double WrittenLength(double beat) const;
     bool CanEdit(int staff, int bar);
+    bool IsProposalBar(int staff, int bar) const;
     void PushUndo();
     void WriteRange(int staff, int bar, double start, double length, const Event* note);
     void ClickNote(const Target& t);
@@ -95,16 +100,21 @@ private:
     void DrawGhost(wxGraphicsContext& gc, double x, double top, int step, double beats);
     void DrawInputBanner(wxGraphicsContext& gc);
 
+    void RefreshLayout();
+    void LayoutPages();
     void UpdateVirtualSize();
     double PageX() const;
+    double PageTop(int page) const;
     void ComputeLayout();
+    double PrefixWidth(int system) const;
     double BarX(int bar) const { return layout_[bar].x; }
     double BarWidth(int bar) const { return layout_[bar].width; }
     int BarAtX(int system, double x) const;  // -1 if outside the system's bars
     double StaffTop(int system, int staff) const;
     double BeatX(int bar, double beat) const;
+    int SystemOfBar(int bar) const { return bar / project_.settings.barsPerLine; }
 
-    void DrawPage(wxGraphicsContext& gc);
+    void DrawPage(wxGraphicsContext& gc, int page, double viewTop, double viewBottom);
     void DrawSystem(wxGraphicsContext& gc, int system);
     void DrawPrefix(wxGraphicsContext& gc, int system, int staff);
     void DrawEvents(wxGraphicsContext& gc, const std::vector<Event>& events, int bar, double top,
@@ -114,15 +124,21 @@ private:
 
     const std::vector<Event>& EventsFor(int staff, int bar) const;
 
-    Score score_;
+    Project project_;
+    Score& score_ = project_.score;
     std::vector<BarLayout> layout_;
+    std::vector<System> systems_;
+    std::vector<double> staffOffset_;
+    double systemH_ = 0, pageH_ = 0;
+    int pageCount_ = 1;
     std::vector<Score> undo_, redo_;
-    std::vector<std::vector<Event>> proposal_;            // Violin I, bars 5-6
+    std::vector<std::vector<Event>> proposal_;  // the sample's Violin I, bars 5-6
 
     ProposalState proposalState_ = ProposalState::None;
     double zoom_ = 0.8;
     double playhead_ = 0;
     bool playheadVisible_ = false;
+    int followSystem_ = -1;
     int selectedBar_ = -1;
     int selectedStaff_ = -1;
 

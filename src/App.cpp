@@ -4,7 +4,7 @@ class ComposerApp : public wxApp {
 public:
     bool OnInit() override {
         MSWEnableDarkMode(DarkMode_Always);
-        (new MainFrame())->Show();
+        (new MainFrame(argc > 1 ? wxString(argv[1]) : wxString()))->Show();
         return true;
     }
 };

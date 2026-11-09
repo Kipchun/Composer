@@ -10,6 +10,7 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/module.h"
@@ -142,6 +143,7 @@ struct Vst3Instrument::Impl {
     ProcessContext context{};
     bool processing = false, active = false, prepared = false;
     double sampleRate = 48000;
+    double tempo = 96;
     int64_t projectSamples = 0;
     EditorWindow* editor = nullptr;
 
@@ -301,7 +303,7 @@ void Vst3Instrument::Process(const MidiEvent* events, int count, float* left, fl
     p.context = ProcessContext{};
     p.context.state = ProcessContext::kPlaying | ProcessContext::kTempoValid;
     p.context.sampleRate = p.sampleRate;
-    p.context.tempo = 96;
+    p.context.tempo = p.tempo;
     p.context.projectTimeSamples = p.projectSamples;
     p.projectSamples += frames;
 
@@ -318,6 +320,36 @@ void Vst3Instrument::Process(const MidiEvent* events, int count, float* left, fl
     } else {
         std::fill_n(left, frames, 0.f);
         std::fill_n(right, frames, 0.f);
+    }
+}
+
+void Vst3Instrument::SetTempo(double tempo) { impl_->tempo = tempo; }
+
+void Vst3Instrument::GetState(std::string& component, std::string& controller) const {
+    Impl& p = *impl_;
+    const auto read = [](auto* object, std::string& out) {
+        MemoryStream stream;
+        if (object && object->getState(&stream) == kResultOk)
+            out.assign(stream.getData(), size_t(stream.getSize()));
+    };
+    read(p.component.get(), component);
+    read(p.controller.get(), controller);
+}
+
+void Vst3Instrument::SetState(const std::string& component, const std::string& controller) {
+    Impl& p = *impl_;
+    if (!component.empty()) {
+        MemoryStream stream(const_cast<char*>(component.data()), TSize(component.size()));
+        p.component->setState(&stream);
+        if (p.controller) {
+            int64 ignored = 0;
+            stream.seek(0, IBStream::kIBSeekSet, &ignored);
+            p.controller->setComponentState(&stream);
+        }
+    }
+    if (p.controller && !controller.empty()) {
+        MemoryStream stream(const_cast<char*>(controller.data()), TSize(controller.size()));
+        p.controller->setState(&stream);
     }
 }
 

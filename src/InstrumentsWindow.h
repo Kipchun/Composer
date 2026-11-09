@@ -1,22 +1,27 @@
-// Chooses the sound for each staff and shows whether it is producing audio.
+// Chooses the sound for each instrument and shows whether it is producing audio.
 #pragma once
 
 #include <wx/choice.h>
 #include <wx/gauge.h>
 #include <wx/timer.h>
 
-#include <array>
+#include <functional>
 #include <vector>
 
-#include "ScoreCanvas.h"
+#include "Project.h"
 #include "audio/AudioEngine.h"
 #include "audio/Vst3Host.h"
 
 class InstrumentsWindow : public wxFrame {
 public:
-    static constexpr int kTracks = 6;
+    InstrumentsWindow(wxWindow* parent, AudioEngine* engine, const std::vector<TrackDef>& tracks);
 
-    InstrumentsWindow(wxWindow* parent, AudioEngine* engine);
+    // Captures each chosen plugin and its current settings for saving.
+    std::vector<PluginSetup> GetPluginSetups() const;
+    // Returns false, with a reason, if the plugin is missing or won't load.
+    bool RestorePlugin(const PluginSetup& setup, wxString* error);
+
+    std::function<void()> onChanged;
 
 private:
     struct Row {
@@ -33,8 +38,9 @@ private:
     void OnMeterTick(wxTimerEvent&);
 
     AudioEngine* engine_;
+    std::vector<TrackDef> tracks_;
     std::vector<PluginInfo> plugins_;
-    std::array<Row, kTracks> rows_;
+    std::vector<Row> rows_;
     wxStaticText* status_ = nullptr;
     wxTimer meter_;
 };

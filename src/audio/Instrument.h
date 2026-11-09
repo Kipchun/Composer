@@ -13,10 +13,11 @@ struct MidiEvent {
 class Instrument {
 public:
     virtual ~Instrument() = default;
+    virtual void SetTempo(double) {}
     // Called on the audio thread. Writes exactly `frames` samples to left and right.
     virtual void Process(const MidiEvent* events, int count, float* left, float* right,
                          int frames) = 0;
 };
 
-// The built-in sound used when a staff has no plugin. Timbre varies by staff.
-std::unique_ptr<Instrument> MakePlaceholder(int staff, double sampleRate);
+// The built-in sound used when an instrument has no plugin.
+std::unique_ptr<Instrument> MakePlaceholder(int timbre, double sampleRate);

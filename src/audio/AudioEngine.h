@@ -16,7 +16,6 @@
 class AudioEngine {
 public:
     static constexpr int kBlock = 512;
-    static constexpr double kTempo = 96;
 
     explicit AudioEngine(int tracks);
     ~AudioEngine();
@@ -34,6 +33,8 @@ public:
     void Seek(double beats);
     void SetLoop(bool on);
     void SetClick(bool on);
+    void SetTempo(double quartersPerMinute);
+    void SetClickUnit(double quarters);
     void Preview(int track, int pitch);
 
     double Beats() const;
@@ -58,7 +59,7 @@ private:
     void Mix();
     void AddClick(int64_t start);
     void MoveCursor();
-    double SamplesPerBeat() const { return sampleRate_ * 60.0 / kTempo; }
+    double SamplesPerBeat() const { return sampleRate_ * 60.0 / tempo_; }
 
     int tracks_;
     double sampleRate_ = 48000;
@@ -77,6 +78,7 @@ private:
     std::vector<Sounding> previews_, newPreviews_;
     int clickFrames_ = 0;
     double clickPhase_ = 0;
+    double tempo_ = 96, clickUnit_ = 1;
 
     std::vector<float> mixL_, mixR_, trackL_, trackR_;
     std::unique_ptr<std::atomic<float>[]> peaks_;

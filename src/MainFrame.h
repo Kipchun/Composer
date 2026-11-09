@@ -16,7 +16,7 @@
 
 class MainFrame : public wxFrame {
 public:
-    MainFrame();
+    explicit MainFrame(const wxString& startupFile = wxEmptyString);
     ~MainFrame() override;
 
 private:
@@ -31,6 +31,18 @@ private:
     void OnCharHook(wxKeyEvent& event);
     void SyncInputValue();
     void PushSchedule();
+    void ApplyProject(const Project& project, const wxString& path, bool keepConversation = false);
+    void ChangeInstruments();
+    void PushProjectInfo();
+    void NewProject();
+    void OpenProject();
+    void OpenProjectFile(const wxString& path);
+    bool SaveProject(bool chooseLocation);
+    bool ConfirmDiscard();
+    void EditSettings();
+    void SetModified(bool modified);
+    void UpdateTitle();
+    void StopPlayback();
     void ShowInstruments();
     void OnClose(wxCloseEvent& event);
 
@@ -42,6 +54,8 @@ private:
     DirectorPanel* director_ = nullptr;
     InstrumentsWindow* instruments_ = nullptr;
     std::unique_ptr<AudioEngine> engine_;
+    wxString path_;
+    bool modified_ = false;
 
     wxTimer timer_;
     double beats_ = 0;

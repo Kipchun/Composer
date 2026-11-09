@@ -26,7 +26,11 @@ public:
 
     void Process(const MidiEvent* events, int count, float* left, float* right,
                  int frames) override;
+    void SetTempo(double tempo) override;
     bool OpenEditor(wxWindow* parent, const wxString& title);
+    // UI thread. These capture and restore the plugin's settings, including its patch.
+    void GetState(std::string& component, std::string& controller) const;
+    void SetState(const std::string& component, const std::string& controller);
 
 private:
     Vst3Instrument();

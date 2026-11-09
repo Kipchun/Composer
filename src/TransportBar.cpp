@@ -23,6 +23,13 @@ void TransportBar::SetPosition(int bar, int beat) {
     Refresh();
 }
 
+void TransportBar::SetProjectInfo(int tempo, const wxString& key, const wxString& time) {
+    tempoValue_ = tempo;
+    keyLabel_ = key;
+    timeLabel_ = time;
+    Refresh();
+}
+
 void TransportBar::SetZoomPercent(int percent) {
     zoom_ = percent;
     Refresh();
@@ -175,9 +182,9 @@ void TransportBar::OnPaint(wxPaintEvent&) {
     }
 
     DrawReadout(*gc, position_, "BAR / BEAT", wxString::Format("%03d / %d", bar_, beat_));
-    DrawReadout(*gc, tempo_, "TEMPO", Glyph(0x2669) + " 96");
-    DrawReadout(*gc, key_, "KEY", "E" + Glyph(0x266D) + " major");
-    DrawReadout(*gc, time_, "TIME", "4/4");
+    DrawReadout(*gc, tempo_, "TEMPO", Glyph(0x2669) + wxString::Format(" %d", tempoValue_));
+    DrawReadout(*gc, key_, "KEY", keyLabel_);
+    DrawReadout(*gc, time_, "TIME", timeLabel_);
     DrawCentered(*gc, wxString::Format("%d%%", zoom_), zoomLabel_, UiFont(13), kText);
 }
 
@@ -198,7 +205,12 @@ void TransportBar::OnMotion(wxMouseEvent& e) {
 
 void TransportBar::OnLeftDown(wxMouseEvent& e) {
     Button* b = FindButton(e.GetPosition());
-    if (!b) return;
+    if (!b) {
+        // The tempo, key and time readouts open the project settings.
+        const wxPoint p = e.GetPosition();
+        if ((Hit(tempo_, p) || Hit(key_, p) || Hit(time_, p)) && onAction) onAction(OpenSettings);
+        return;
+    }
     switch (b->action) {
         case Loop: loop_ = !loop_; break;
         case Click: click_ = !click_; break;
