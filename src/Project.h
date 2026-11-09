@@ -92,6 +92,17 @@ struct InstrumentSpec {
     bool grandStaff;
 };
 
+// A change the Director suggests. `original` lets the app notice if the score moved on.
+struct BarEdit {
+    int staff = 0, bar = 0;
+    Bar replacement, original;
+};
+
+struct Proposal {
+    wxString title, summary;
+    std::vector<BarEdit> edits;
+};
+
 const std::vector<InstrumentSpec>& InstrumentCatalog();
 int FindInstrument(const char* name);
 
@@ -116,7 +127,16 @@ Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
                          const std::vector<PluginSetup>& plugins);
 Project MakeDemoProject();
 
+Proposal MakeDemoProposal(const Project& project);
+
 wxString KeyLabel(int fifths, bool minor);
+wxString StaffLabel(const Project& project, int staff);
+bool BarsEqual(const Bar& a, const Bar& b);
+
+// Pitch helpers. Letters are C=0 ... B=6.
+int MiddleLine(Clef clef);  // diatonic position of the clef's middle line, counted from C0
+int KeyAlteration(int fifths, int letter);  // -1, 0 or +1 from the key signature
+int StepToMidi(Clef clef, int fifths, int step, char accidental);
 Bar FullBarRest(double barBeats);
 bool ParseBar(const wxString& text, Bar& out);
 

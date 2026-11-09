@@ -16,7 +16,6 @@ public:
     void ScoreChanged();  // the project's shape may have changed too
     void SetSelection(int bar, int staff);
     void SetPlayhead(double beats, bool visible);
-    void SetProposal(ProposalState state);
 
     std::function<void(int bar, int staff)> onSelect;
 
@@ -30,5 +29,4 @@ private:
     int selectedBar_ = -1, selectedStaff_ = -1;
     double playhead_ = 0;
     bool playheadVisible_ = false;
-    ProposalState proposal_ = ProposalState::None;
 };

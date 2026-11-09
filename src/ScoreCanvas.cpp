@@ -16,8 +16,6 @@ constexpr double kSysX = 150, kSysW = 830;
 constexpr double kLine = 8, kStaffH = 32;  // staff line gap and height
 constexpr double kFirstTop = 215, kNextTop = 80, kBottom = 80, kSystemGap = 96;
 constexpr double kStaffGap = 44, kMinStaffGap = 20, kGrandGapRatio = 0.68;
-constexpr int kViolin = 2;
-constexpr int kProposalFirst = 4, kProposalLast = 5;
 constexpr int kMaxStep = 12;
 constexpr double kEps = 1e-6, kPitchReach = 62;
 
@@ -35,34 +33,6 @@ bool IsDotted(double beats) { return beats == 3.0 || beats == 1.5 || beats == 0.
 // notes get far more room than their duration alone would give them.
 double ColumnGap(double beats) { return 3 + 11 * std::log2(beats / 0.25); }
 
-// The diatonic position of each clef's middle line, counted from C0.
-int MiddleLine(Clef clef) { return clef == Clef::Treble ? 34 : clef == Clef::Alto ? 28 : 22; }
-
-// Letters altered by a key signature, in the order the signature adds them (C=0 ... B=6).
-const int kSharpOrder[7] = {3, 0, 4, 1, 5, 2, 6};
-const int kFlatOrder[7] = {6, 2, 5, 1, 4, 0, 3};
-
-// Converts a staff position to a MIDI pitch, using the key unless an accidental applies.
-int StepToMidi(Clef clef, int fifths, int step, char accidental) {
-    static const int kSemitones[7] = {0, 2, 4, 5, 7, 9, 11};  // C D E F G A B
-    const int diatonic = MiddleLine(clef) + step;
-    const int letter = diatonic % 7;
-    int midi = 12 * (diatonic / 7 + 1) + kSemitones[letter];
-    switch (accidental) {
-        case '#': midi += 1; break;
-        case 'b': midi -= 1; break;
-        case 'x': midi += 2; break;
-        case 'B': midi -= 2; break;
-        case 'n': break;
-        default:
-            for (int i = 0; i < std::abs(fifths); ++i) {
-                if (fifths > 0 && kSharpOrder[i] == letter) midi += 1;
-                if (fifths < 0 && kFlatOrder[i] == letter) midi -= 1;
-            }
-    }
-    return midi;
-}
-
 // Where the i-th sign of a key signature sits, written for each clef.
 int KeySignatureStep(Clef clef, bool sharps, int i) {
     static const int kTrebleSharps[7] = {4, 1, 5, 2, -1, 3, 0};
@@ -78,8 +48,6 @@ double SnapGrid(double beats) {
     if (beats == 0.75) return 0.25;
     return beats < 1 ? beats : 1;
 }
-
-const char* const kProposedBars[] = {"e:5 e:4 e:3 e:2 q:3 q:5", "q.:4 e:3 h:2"};
 
 double StepY(double top, int step) { return top + kStaffH / 2 - step * kLine / 2; }
 
@@ -135,11 +103,6 @@ ScoreCanvas::ScoreCanvas(wxWindow* parent)
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     SetScrollRate(16, 16);
 
-    for (const char* text : kProposedBars) {
-        Bar bar;
-        ParseBar(text, bar);
-        proposal_.push_back(std::move(bar));
-    }
     SetProject(MakeDemoProject());
 
     Bind(wxEVT_PAINT, &ScoreCanvas::OnPaint, this);
@@ -158,7 +121,7 @@ void ScoreCanvas::SetProject(const Project& project) {
     project_ = project;
     undo_.clear();
     redo_.clear();
-    proposalState_ = ProposalState::None;
+    preview_.clear();
     selectedBar_ = selectedStaff_ = -1;
     playheadVisible_ = false;
     followSystem_ = -1;
@@ -201,6 +164,7 @@ void ScoreCanvas::ApplySettings(const ProjectSettings& next) {
     if (caret_.bar >= next.bars) caret_.bar = next.bars - 1;
     if (caret_.beat >= beats) caret_.beat = 0;
     if (std::abs(oldBeats - beats) > kEps) project_.demo = false;  // its proposal no longer fits
+    preview_.clear();
     hover_ = lastEntered_ = Target{};
     RefreshLayout();
     if (onChanged) onChanged();
@@ -213,12 +177,7 @@ void ScoreCanvas::RefreshLayout() {
     Refresh();
 }
 
-wxString ScoreCanvas::StaffName(int staff) const {
-    const StaffDef& def = project_.staves[staff];
-    if (def.braceToNext) return def.name + " (RH)";
-    if (def.name.empty() && staff > 0) return project_.staves[staff - 1].name + " (LH)";
-    return def.name;
-}
+wxString ScoreCanvas::StaffName(int staff) const { return StaffLabel(project_, staff); }
 
 void ScoreCanvas::UpdateVirtualSize() {
     SetVirtualSize(int((kPageW + kMargin * 2) * zoom_), int((PageTop(pageCount_)) * zoom_));
@@ -264,18 +223,34 @@ void ScoreCanvas::SetZoom(double zoom) {
     if (onZoom) onZoom(zoom_);
 }
 
-void ScoreCanvas::SetProposal(ProposalState state) {
-    proposalState_ = state;
-    if (state == ProposalState::Applied && project_.demo) {
-        // The proposal becomes part of the score, so older undo steps no longer apply.
-        for (int b = kProposalFirst; b <= kProposalLast; ++b)
-            score_[kViolin][b] = proposal_[b - kProposalFirst];
-        undo_.clear();
-        redo_.clear();
-        if (onChanged) onChanged();
-    }
+void ScoreCanvas::ShowProposal(const Proposal& proposal) {
+    preview_.clear();
+    for (const BarEdit& edit : proposal.edits) preview_[{edit.staff, edit.bar}] = edit.replacement;
     ComputeLayout();
     Refresh();
+}
+
+void ScoreCanvas::HideProposal() {
+    preview_.clear();
+    ComputeLayout();
+    Refresh();
+}
+
+bool ScoreCanvas::IsProposalStale(const Proposal& proposal) const {
+    for (const BarEdit& edit : proposal.edits) {
+        if (edit.staff >= StaffCount() || edit.bar >= BarCount() ||
+            !BarsEqual(score_[edit.staff][edit.bar], edit.original))
+            return true;
+    }
+    return false;
+}
+
+void ScoreCanvas::ApplyProposal(const Proposal& proposal) {
+    if (IsProposalStale(proposal)) return;
+    PushUndo();
+    for (const BarEdit& edit : proposal.edits) score_[edit.staff][edit.bar] = edit.replacement;
+    preview_.clear();
+    Changed();
 }
 
 void ScoreCanvas::SetPlayhead(double beats, bool visible) {
@@ -407,13 +382,13 @@ double ScoreCanvas::BeatX(int bar, double beat) const {
     return BarX(bar);
 }
 
-bool ScoreCanvas::IsProposalBar(int staff, int bar) const {
-    return project_.demo && staff == kViolin && bar >= kProposalFirst && bar <= kProposalLast;
-}
+bool ScoreCanvas::IsProposalBar(int staff, int bar) const { return preview_.count({staff, bar}) > 0; }
 
 const std::vector<ScoreCanvas::Event>& ScoreCanvas::EventsFor(int staff, int bar) const {
-    if (proposalState_ == ProposalState::Preview && IsProposalBar(staff, bar))
-        return proposal_[bar - kProposalFirst];
+    if (!preview_.empty()) {
+        const auto it = preview_.find({staff, bar});
+        if (it != preview_.end()) return it->second;
+    }
     return score_[staff][bar];
 }
 
@@ -529,16 +504,29 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
         FillRound(gc, wxRect2DDouble(BarX(selectedBar_) + 1, y, BarWidth(selectedBar_) - 2, height), 3,
                   WithAlpha(kSelect, 42));
     }
-    if (project_.demo && proposalState_ == ProposalState::Preview && firstBar <= kProposalFirst &&
-        kProposalFirst < endBar) {
-        const double top = StaffTop(system, kViolin);
-        const wxRect2DDouble r(BarX(kProposalFirst) + 1, top - 12,
-                               BarWidth(kProposalFirst) + BarWidth(kProposalLast) - 2, kStaffH + 24);
-        FillRound(gc, r, 4, WithAlpha(kProposal, 38));
-        StrokeRound(gc, r, 4, kProposal, 1.2);
-        const wxRect2DDouble tag(r.m_x, r.m_y - 21, 150, 19);
-        FillRound(gc, tag, 3, kProposal);
-        DrawCentered(gc, "Director proposal", tag, UiFont(12, true), *wxWHITE);
+    if (!preview_.empty()) {
+        bool tagged = false;
+        for (int staff = 0; staff < staves; ++staff) {
+            for (int bar = firstBar; bar < endBar;) {
+                if (!IsProposalBar(staff, bar)) {
+                    ++bar;
+                    continue;
+                }
+                int end = bar;
+                while (end + 1 < endBar && IsProposalBar(staff, end + 1)) ++end;
+                const double top = StaffTop(system, staff);
+                const wxRect2DDouble r(BarX(bar) + 1, top - 12, BarX(end) + BarWidth(end) - BarX(bar) - 2, kStaffH + 24);
+                FillRound(gc, r, 4, WithAlpha(kProposal, 38));
+                StrokeRound(gc, r, 4, kProposal, 1.2);
+                if (!tagged) {
+                    const wxRect2DDouble tag(r.m_x, r.m_y + r.m_height + 2, 150, 19);
+                    FillRound(gc, tag, 3, kProposal);
+                    DrawCentered(gc, "Director proposal", tag, UiFont(12, true), *wxWHITE);
+                    tagged = true;
+                }
+                bar = end + 1;
+            }
+        }
     }
 
     for (int staff = 0; staff < staves; ++staff) {
@@ -570,7 +558,7 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
         }
 
         for (int bar = firstBar; bar < endBar; ++bar) {
-            const bool proposed = proposalState_ == ProposalState::Preview && IsProposalBar(staff, bar);
+            const bool proposed = IsProposalBar(staff, bar);
             DrawEvents(gc, EventsFor(staff, bar), bar, top, proposed ? kProposal : kInk);
         }
     }
@@ -941,7 +929,7 @@ double ScoreCanvas::WrittenLength(double beat) const {
 }
 
 bool ScoreCanvas::CanEdit(int staff, int bar) {
-    if (proposalState_ == ProposalState::Preview && IsProposalBar(staff, bar)) {
+    if (IsProposalBar(staff, bar)) {
         if (onInputStatus) onInputStatus("Hide or apply the Director's preview to edit these bars");
         return false;
     }

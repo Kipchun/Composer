@@ -44,11 +44,6 @@ void TimelinePanel::SetPlayhead(double beats, bool visible) {
     Refresh();
 }
 
-void TimelinePanel::SetProposal(ProposalState state) {
-    proposal_ = state;
-    Refresh();
-}
-
 double TimelinePanel::BarWidth() const {
     return (GetClientSize().x - kLabelW - 12) / double(std::max(1, score_->BarCount()));
 }
@@ -101,8 +96,7 @@ void TimelinePanel::OnPaint(wxPaintEvent&) {
 
         const wxColour& color = kTrackColors[project.staves[row].track % colors];
         for (int bar = 0; bar < bars; ++bar) {
-            const bool proposed = project.demo && proposal_ == ProposalState::Preview && row == 2 &&
-                                  (bar == 4 || bar == 5);
+            const bool proposed = score_->IsProposalBar(row, bar);
             const wxRect2DDouble cell(kLabelW + bar * barW + 1, y + 1, std::max(1.0, barW - 2), kRowH - 3);
             FillRound(*gc, cell, 2, kBg);
             const double fill = score_->FilledFraction(row, bar);

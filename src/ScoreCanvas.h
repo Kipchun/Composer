@@ -4,6 +4,7 @@
 #include <wx/scrolwin.h>
 
 #include <functional>
+#include <map>
 #include <vector>
 
 #include "Project.h"
@@ -28,7 +29,12 @@ public:
     double TotalBeats() const { return BarCount() * BarBeats(); }
     wxString StaffName(int staff) const;
 
-    void SetProposal(ProposalState state);
+    // Preview draws and plays the proposal without changing the score.
+    void ShowProposal(const Proposal& proposal);
+    void HideProposal();
+    void ApplyProposal(const Proposal& proposal);  // one undo step
+    bool IsProposalStale(const Proposal& proposal) const;
+    bool IsProposalBar(int staff, int bar) const;  // shown in the current preview
     void SetPlayhead(double beats, bool visible);
     void SetSelection(int bar, int staff);  // staff -1 selects the whole bar
     void SetZoom(double zoom);
@@ -87,7 +93,6 @@ private:
     bool ToPage(const wxPoint& client, double& x, double& y, int& page) const;
     double WrittenLength(double beat) const;
     bool CanEdit(int staff, int bar);
-    bool IsProposalBar(int staff, int bar) const;
     void PushUndo();
     void WriteRange(int staff, int bar, double start, double length, const Event* note);
     void ClickNote(const Target& t);
@@ -132,9 +137,8 @@ private:
     double systemH_ = 0, pageH_ = 0;
     int pageCount_ = 1;
     std::vector<Score> undo_, redo_;
-    std::vector<std::vector<Event>> proposal_;  // the sample's Violin I, bars 5-6
+    std::map<std::pair<int, int>, Bar> preview_;  // (staff, bar) -> proposed contents
 
-    ProposalState proposalState_ = ProposalState::None;
     double zoom_ = 0.8;
     double playhead_ = 0;
     bool playheadVisible_ = false;

@@ -196,6 +196,65 @@ Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
     return result;
 }
 
+int MiddleLine(Clef clef) { return clef == Clef::Treble ? 34 : clef == Clef::Alto ? 28 : 22; }
+
+int KeyAlteration(int fifths, int letter) {
+    static const int kSharpOrder[7] = {3, 0, 4, 1, 5, 2, 6};
+    static const int kFlatOrder[7] = {6, 2, 5, 1, 4, 0, 3};
+    for (int i = 0; i < std::abs(fifths); ++i) {
+        if (fifths > 0 && kSharpOrder[i] == letter) return 1;
+        if (fifths < 0 && kFlatOrder[i] == letter) return -1;
+    }
+    return 0;
+}
+
+int StepToMidi(Clef clef, int fifths, int step, char accidental) {
+    static const int kSemitones[7] = {0, 2, 4, 5, 7, 9, 11};  // C D E F G A B
+    const int diatonic = MiddleLine(clef) + step;
+    const int letter = diatonic % 7;
+    int midi = 12 * (diatonic / 7 + 1) + kSemitones[letter];
+    switch (accidental) {
+        case '#': return midi + 1;
+        case 'b': return midi - 1;
+        case 'x': return midi + 2;
+        case 'B': return midi - 2;
+        case 'n': return midi;
+        default: return midi + KeyAlteration(fifths, letter);
+    }
+}
+
+wxString StaffLabel(const Project& project, int staff) {
+    const StaffDef& def = project.staves[staff];
+    if (def.braceToNext) return def.name + " (RH)";
+    if (def.name.empty() && staff > 0) return project.staves[staff - 1].name + " (LH)";
+    return def.name;
+}
+
+bool BarsEqual(const Bar& a, const Bar& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::abs(a[i].beats - b[i].beats) > 1e-6 || a[i].rest != b[i].rest || a[i].steps != b[i].steps ||
+            a[i].accidentals != b[i].accidentals)
+            return false;
+    return true;
+}
+
+Proposal MakeDemoProposal(const Project& project) {
+    static const char* const bars[] = {"e:5 e:4 e:3 e:2 q:3 q:5", "q.:4 e:3 h:2"};
+    Proposal proposal;
+    proposal.title = "Lift Violin I in bars 5" + ui::Glyph(0x2013) + "6";
+    proposal.summary = "The melody rises toward G5, with added eighth-note motion in bar 5.";
+    for (int i = 0; i < 2; ++i) {
+        BarEdit edit;
+        edit.staff = 2;
+        edit.bar = 4 + i;
+        ParseBar(bars[i], edit.replacement);
+        edit.original = project.score[edit.staff][edit.bar];
+        proposal.edits.push_back(std::move(edit));
+    }
+    return proposal;
+}
+
 wxString KeyLabel(int fifths, bool minor) {
     static const char* const major[15] = {"Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C",
                                           "G",  "D",  "A",  "E",  "B",  "F#", "C#"};

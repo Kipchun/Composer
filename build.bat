@@ -9,6 +9,10 @@ set "PATH=%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VS%\Commo
 if not exist "%~dp0third_party\vst3sdk\public.sdk" (
     git clone --depth 1 --branch v3.8.1_build_84 --recurse-submodules --shallow-submodules https://github.com/steinbergmedia/vst3sdk.git "%~dp0third_party\vst3sdk" || exit /b 1
 )
+if not exist "%~dp0third_party\nlohmann\json.hpp" (
+    mkdir "%~dp0third_party\nlohmann" 2>nul
+    "%SystemRoot%\System32\curl.exe" -fsSL -o "%~dp0third_party\nlohmann\json.hpp" https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp || exit /b 1
+)
 cmake -S "%~dp0." -B "%~dp0build" -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
 cmake --build "%~dp0build" || exit /b 1
 echo.

@@ -7,6 +7,7 @@
 #include <set>
 
 #include "ProjectDialogs.h"
+#include "director/DirectorSettings.h"
 
 using namespace ui;
 
@@ -19,6 +20,8 @@ enum {
     ID_Instruments,
     ID_ProjectSettings,
     ID_ChangeInstruments,
+    ID_DirectorSettings,
+    ID_DirectorNew,
 };
 const char* const kFileFilter = "Composer projects (*.composer)|*.composer";
 const char* const kPaneDirector = "director";
@@ -86,9 +89,9 @@ void MainFrame::BuildMenus() {
     playback->Append(wxID_ANY, "&Mixer...");
 
     auto* director = new wxMenu;
-    director->Append(wxID_ANY, "&New Conversation");
+    director->Append(ID_DirectorNew, "&New Conversation");
     director->Append(wxID_ANY, "Change &History...");
-    director->Append(wxID_ANY, "&Settings...");
+    director->Append(ID_DirectorSettings, "&Settings...");
 
     auto* help = new wxMenu;
     help->Append(wxID_ABOUT, "&About Composer");
@@ -108,6 +111,15 @@ void MainFrame::BuildMenus() {
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowInstruments(); }, ID_Instruments);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { EditSettings(); }, ID_ProjectSettings);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeInstruments(); }, ID_ChangeInstruments);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+        ShowDirectorSettings(this);
+        director_->RefreshModelName();
+    }, ID_DirectorSettings);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+        score_->HideProposal();
+        PushSchedule();
+        director_->ResetConversation(score_->GetProject().settings.title);
+    }, ID_DirectorNew);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { NewProject(); }, wxID_NEW);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { OpenProject(); }, wxID_OPEN);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { SaveProject(false); }, wxID_SAVE);
@@ -219,17 +231,22 @@ void MainFrame::Connect() {
         timeline_->ScoreChanged();
         PushSchedule();
         SetModified(true);
+        director_->ScoreChanged();
     };
     score_->onNotePreview = [this](int track, int midi) { engine_->Preview(track, midi); };
     score_->onInputStatus = [this](const wxString& text) { SetStatusText(text, 0); };
     timeline_->SetScore(score_);
     SyncInputValue();
-    director_->onProposal = [this](ProposalState state) {
-        score_->SetProposal(state);
-        timeline_->SetProposal(state);
+    director_->SetScore(score_);
+    director_->onOpenSettings = [this] { ShowDirectorSettings(this); };
+    director_->onProposal = [this](const Proposal* proposal, ProposalState state) {
+        if (state == ProposalState::Preview) score_->ShowProposal(*proposal);
+        else if (state == ProposalState::Applied) score_->ApplyProposal(*proposal);
+        else score_->HideProposal();
+        timeline_->Refresh();
         PushSchedule();
         SetStatusText(state == ProposalState::Preview   ? "Previewing Director proposal"
-                      : state == ProposalState::Applied ? "Director proposal applied"
+                      : state == ProposalState::Applied ? "Director proposal applied. Ctrl+Z to undo."
                                                         : "Showing the original score",
                       0);
     };
@@ -300,9 +317,11 @@ void MainFrame::ApplyProject(const Project& project, const wxString& path, bool 
 
     timeline_->SetScore(score_);
     timeline_->SetSelection(-1, -1);
-    timeline_->SetProposal(ProposalState::None);
     timeline_->SetPlayhead(0, false);
-    if (!current.demo && !keepConversation) director_->ResetConversation(current.settings.title);
+    director_->CancelRequest();
+    if (current.demo) director_->ShowSampleConversation(MakeDemoProposal(current));
+    else if (!keepConversation) director_->ResetConversation(current.settings.title);
+    else director_->InvalidateProposals();
 
     path_ = path;
     PushProjectInfo();
