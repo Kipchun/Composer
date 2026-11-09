@@ -16,6 +16,7 @@ public:
     void SetPosition(int bar, int beat);
     void SetZoomPercent(int percent);
     bool IsLooping() const { return loop_; }
+    bool IsClickOn() const { return click_; }
 
     std::function<void(Action)> onAction;
 
@@ -36,7 +37,7 @@ private:
 
     std::vector<Button> buttons_;
     wxRect2DDouble position_, tempo_, key_, time_, zoomLabel_;
-    bool playing_ = false, loop_ = false, click_ = true, recording_ = false;
+    bool playing_ = false, loop_ = false, click_ = false, recording_ = false;
     int bar_ = 1, beat_ = 1, zoom_ = 80, hover_ = -1;
     Action view_ = ViewScore;
 };

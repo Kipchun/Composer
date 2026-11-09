@@ -10,6 +10,7 @@ class TimelinePanel : public wxPanel {
 public:
     explicit TimelinePanel(wxWindow* parent);
 
+    void SetScore(const ScoreCanvas* score) { score_ = score; }
     void SetSelection(int bar, int staff);
     void SetPlayhead(double beats, bool visible);
     void SetProposal(ProposalState state);
@@ -22,6 +23,7 @@ private:
     double BarWidth() const;
     double RowY(int row) const;
 
+    const ScoreCanvas* score_ = nullptr;
     int selectedBar_ = -1, selectedStaff_ = -1;
     double playhead_ = 0;
     bool playheadVisible_ = false;

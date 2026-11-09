@@ -10,11 +10,6 @@ const wxColour kTrackColors[kRows] = {
     wxColour(0x6C, 0xA8, 0xE8), wxColour(0x8E, 0x8B, 0xE0), wxColour(0xE3, 0x8A, 0x6A),
     wxColour(0xC4, 0x72, 0x9F), wxColour(0x5F, 0xB4, 0xB0), wxColour(0x4C, 0x98, 0x94),
 };
-// Flute is silent at the start, so its first blocks are empty or partial.
-const double kFill[kRows][ScoreCanvas::kBars] = {
-    {0, 0.25, 1, 0.75, 1, 1, 1, 0.75}, {1, 1, 1, 1, 1, 1, 1, 0.75}, {1, 1, 1, 0.75, 1, 1, 1, 1},
-    {1, 1, 1, 1, 1, 1, 1, 1},          {1, 1, 1, 0.75, 1, 1, 1, 1}, {1, 1, 1, 1, 1, 1, 1, 1},
-};
 }  // namespace
 
 TimelinePanel::TimelinePanel(wxWindow* parent) : wxPanel(parent) {
@@ -83,7 +78,7 @@ void TimelinePanel::OnPaint(wxPaintEvent&) {
                 proposal_ == ProposalState::Preview && row == 2 && (bar == 4 || bar == 5);
             const wxRect2DDouble cell(kLabelW + bar * barW + 1, y + 1, barW - 2, kRowH - 3);
             FillRound(*gc, cell, 2, kBg);
-            const double fill = kFill[row][bar];
+            const double fill = score_ ? score_->FilledFraction(row, bar) : 0;
             if (fill > 0) {
                 wxRect2DDouble block = cell;
                 block.m_width *= fill;

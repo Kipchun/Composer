@@ -2,6 +2,13 @@
 
 using namespace ui;
 
+namespace {
+constexpr int kNotes = 0, kAccidentals = 1;
+constexpr int kDot = 5, kRest = 6;
+const char kAccidentalCodes[] = {'#', 'b', 'n', 'x', 'B'};
+const double kValues[] = {4, 2, 1, 0.5, 0.25};
+}  // namespace
+
 PalettePanel::PalettePanel(wxWindow* parent) : wxPanel(parent) {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
 
@@ -19,7 +26,7 @@ PalettePanel::PalettePanel(wxWindow* parent) : wxPanel(parent) {
                   {music(0x1D15D, "Whole note"), music(0x1D15E, "Half note"),
                    music(0x1D15F, "Quarter note"), music(0x1D160, "Eighth note"),
                    music(0x1D161, "Sixteenth note"), plain(Glyph(0x00B7), "Dotted", 26),
-                   music(0x1D13D, "Rest"), plain("3", "Triplet")}};
+                   music(0x1D13D, "Rest")}};
     notes.selected = 2;
 
     sections_.push_back(std::move(notes));
@@ -82,7 +89,7 @@ void PalettePanel::OnPaint(wxPaintEvent&) {
         DrawTextAt(*gc, section.title, 12, section.titleY, titleFont, kMuted);
         for (size_t i = 0; i < section.items.size(); ++i) {
             const Item& item = section.items[i];
-            const bool selected = int(i) == section.selected;
+            const bool selected = IsOn(int(s), int(i));
             const bool hover = int(s) == hoverSection_ && int(i) == hoverItem_;
             FillRound(*gc, item.rect, 5, selected ? kAccent : hover ? kHover : kPanelAlt);
             wxFont font = item.face == Face::Music   ? MusicFont(item.fontPx)
@@ -121,7 +128,57 @@ void PalettePanel::OnMotion(wxMouseEvent& e) {
 void PalettePanel::OnLeftDown(wxMouseEvent& e) {
     int s, i;
     if (!FindItem(e.GetPosition(), s, i)) return;
-    sections_[s].selected = sections_[s].selected == i ? -1 : i;
+    if (s == kNotes && i == kDot) {
+        dotted_ = !dotted_;
+    } else if (s == kNotes && i == kRest) {
+        rest_ = !rest_;
+    } else if (s == kNotes) {
+        sections_[s].selected = i;  // a note value is always chosen
+    } else {
+        sections_[s].selected = sections_[s].selected == i ? -1 : i;
+    }
+    if (s == kNotes || s == kAccidentals) NotifyInput();
     if (onTool) onTool(sections_[s].items[i].tip);
     Refresh();
+}
+
+bool PalettePanel::IsOn(int section, int item) const {
+    if (section == kNotes && item == kDot) return dotted_;
+    if (section == kNotes && item == kRest) return rest_;
+    return sections_[section].selected == item;
+}
+
+PalettePanel::NoteInput PalettePanel::GetNoteInput() const {
+    const int accidental = sections_[kAccidentals].selected;
+    return {kValues[sections_[kNotes].selected] * (dotted_ ? 1.5 : 1.0), rest_,
+            accidental >= 0 ? kAccidentalCodes[accidental] : char(0)};
+}
+
+void PalettePanel::NotifyInput() {
+    if (onNoteInputChanged) onNoteInputChanged();
+    Refresh();
+}
+
+void PalettePanel::SetDuration(int index) {
+    sections_[kNotes].selected = index;
+    NotifyInput();
+}
+
+void PalettePanel::ToggleDot() {
+    dotted_ = !dotted_;
+    NotifyInput();
+}
+
+void PalettePanel::SetAccidental(char accidental) {
+    int index = -1;
+    for (int i = 0; i < 5; ++i)
+        if (kAccidentalCodes[i] == accidental) index = i;
+    int& selected = sections_[kAccidentals].selected;
+    selected = selected == index ? -1 : index;
+    NotifyInput();
+}
+
+void PalettePanel::ClearAccidental() {
+    sections_[kAccidentals].selected = -1;
+    NotifyInput();
 }

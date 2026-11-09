@@ -3,11 +3,12 @@
 using namespace ui;
 
 namespace {
-constexpr double kTempo = 96;
 enum {
     ID_ViewPalette = wxID_HIGHEST + 1,
     ID_ViewTimeline,
     ID_ViewDirector,
+    ID_NoteInput,
+    ID_Instruments,
 };
 const char* const kPaneDirector = "director";
 const char* const kPanePalette = "palette";
@@ -18,16 +19,28 @@ MainFrame::MainFrame()
     : wxFrame(nullptr, wxID_ANY, "Composer - Nocturne in Blue", wxDefaultPosition, wxSize(1560, 980)),
       timer_(this) {
     SetBackgroundColour(kBg);
+    engine_ = std::make_unique<AudioEngine>(InstrumentsWindow::kTracks);
+    for (int t = 0; t < InstrumentsWindow::kTracks; ++t)
+        engine_->SetInstrument(t, MakePlaceholder(t, engine_->SampleRate()));
+
     BuildMenus();
     BuildPanes();
     Connect();
+    instruments_ = new InstrumentsWindow(this, engine_.get());
+    PushSchedule();
+    Bind(wxEVT_CLOSE_WINDOW, &MainFrame::OnClose, this);
     CreateStatusBar(4);
     const int widths[4] = {-1, 150, 180, 240};
     SetStatusWidths(4, widths);
     SetStatusText("Ready: click a bar to set the Director's scope", 0);
     SetStatusText("E" + Glyph(0x266D) + " major  " + Glyph(0x00B7) + "  4/4", 1);
     SetStatusText("8 bars  " + Glyph(0x00B7) + "  6 staves", 2);
-    SetStatusText("Concept UI: no audio or engine", 3);
+    SetStatusText(engine_->HasDevice()
+                      ? wxString::Format("Audio: %.1f kHz", engine_->SampleRate() / 1000)
+                      : wxString("Audio: no output device"),
+                  3);
+    Bind(wxEVT_CHAR_HOOK, &MainFrame::OnCharHook, this);
+    CallAfter([this] { score_->SetFocus(); });  // otherwise the Director's text box takes it
     Centre();
 }
 
@@ -56,16 +69,18 @@ void MainFrame::BuildMenus() {
     view->AppendCheckItem(ID_ViewDirector, "&Director\tCtrl+D");
 
     auto* notes = new wxMenu;
-    notes->Append(wxID_ANY, "Note &Input Mode\tN");
+    // Plain-letter shortcuts are handled in OnCharHook so they can't steal typing
+    // from the Director's text box, which is why these labels aren't accelerators.
+    notes->AppendCheckItem(ID_NoteInput, "Note &Input Mode (N)");
     notes->Append(wxID_ANY, "&Transpose...");
 
     auto* score = new wxMenu;
-    score->Append(wxID_ANY, "&Instruments...\tI");
+    score->Append(ID_Instruments, "&Instruments... (I)");
     score->Append(wxID_ANY, "&Key Signature...");
     score->Append(wxID_ANY, "&Time Signature...");
 
     auto* playback = new wxMenu;
-    playback->Append(wxID_ANY, "&Play / Pause\tSpace");
+    playback->Append(wxID_ANY, "&Play / Pause (Space)");
     playback->Append(wxID_ANY, "&Mixer...");
 
     auto* director = new wxMenu;
@@ -88,6 +103,18 @@ void MainFrame::BuildMenus() {
     SetMenuBar(bar);
 
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowInstruments(); }, ID_Instruments);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { score_->SetNoteInput(!score_->IsNoteInput()); }, ID_NoteInput);
+    Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& e) { e.Check(score_->IsNoteInput()); }, ID_NoteInput);
+    const auto textFocus = [] { return dynamic_cast<wxTextCtrl*>(wxWindow::FindFocus()); };
+    Bind(wxEVT_MENU, [this, textFocus](wxCommandEvent&) {
+        if (auto* text = textFocus()) text->Undo();
+        else score_->Undo();
+    }, wxID_UNDO);
+    Bind(wxEVT_MENU, [this, textFocus](wxCommandEvent&) {
+        if (auto* text = textFocus()) text->Redo();
+        else score_->Redo();
+    }, wxID_REDO);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { TogglePane(kPanePalette); }, ID_ViewPalette);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { TogglePane(kPaneTimeline); }, ID_ViewTimeline);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { TogglePane(kPaneDirector); }, ID_ViewDirector);
@@ -165,19 +192,102 @@ void MainFrame::Connect() {
         if (bar >= 0) SetStatusText(wxString::Format("Selected bar %d", bar + 1), 0);
         else SetStatusText("Selection cleared", 0);
     };
-    timeline_->onSelect = [this](int bar, int staff) { Select(bar, staff); };
+    timeline_->onSelect = [this](int bar, int staff) {
+        score_->SetFocus();
+        Select(bar, staff);
+    };
     score_->onZoom = [this](double z) { transport_->SetZoomPercent(int(z * 100 + 0.5)); };
-    transport_->onAction = [this](TransportBar::Action a) { OnTransport(a); };
-    palette_->onTool = [this](const wxString& tool) { SetStatusText("Tool: " + tool, 0); };
+    transport_->onAction = [this](TransportBar::Action a) {
+        score_->SetFocus();
+        OnTransport(a);
+    };
+    palette_->onTool = [this](const wxString& tool) {
+        score_->SetFocus();
+        SetStatusText("Tool: " + tool, 0);
+    };
+    palette_->onNoteInputChanged = [this] { SyncInputValue(); };
+    score_->onAccidentalUsed = [this] { palette_->ClearAccidental(); };
+    score_->onChanged = [this] {
+        timeline_->Refresh();
+        PushSchedule();
+    };
+    score_->onNotePreview = [this](int staff, int midi) { engine_->Preview(staff, midi); };
+    score_->onInputStatus = [this](const wxString& text) { SetStatusText(text, 0); };
+    timeline_->SetScore(score_);
+    SyncInputValue();
     director_->onProposal = [this](ProposalState state) {
         score_->SetProposal(state);
         timeline_->SetProposal(state);
+        PushSchedule();
         SetStatusText(state == ProposalState::Preview   ? "Previewing Director proposal"
                       : state == ProposalState::Applied ? "Director proposal applied"
                                                         : "Showing the original score",
                       0);
     };
     Bind(wxEVT_TIMER, &MainFrame::OnTick, this);
+}
+
+void MainFrame::PushSchedule() {
+    engine_->SetSchedule(score_->BuildPlayback(), ScoreCanvas::TotalBeats());
+}
+
+void MainFrame::ShowInstruments() {
+    instruments_->Show();
+    instruments_->Raise();
+}
+
+void MainFrame::OnClose(wxCloseEvent& event) {
+    timer_.Stop();
+    engine_.reset();  // shuts plugins down while their windows still exist
+    event.Skip();
+}
+
+void MainFrame::SyncInputValue() {
+    const PalettePanel::NoteInput input = palette_->GetNoteInput();
+    score_->SetInputValue(input.beats, input.rest, input.accidental);
+}
+
+void MainFrame::OnCharHook(wxKeyEvent& event) {
+    if (event.GetKeyCode() == WXK_ESCAPE && score_->IsNoteInput()) {
+        score_->SetNoteInput(false);  // works even while typing to the Director
+        return;
+    }
+
+    // Keys typed into a text box, or combined with Ctrl/Alt, are not commands.
+    if (dynamic_cast<wxTextCtrl*>(wxWindow::FindFocus()) || event.ControlDown() || event.AltDown()) {
+        event.Skip();
+        return;
+    }
+
+    const int key = event.GetKeyCode();
+    if (key == WXK_SPACE) {
+        OnTransport(TransportBar::Play);
+        return;
+    }
+    if (!score_->IsNoteInput()) {
+        if (key == 'N') score_->SetNoteInput(true);
+        else if (key == 'I') ShowInstruments();
+        else event.Skip();
+        return;
+    }
+
+    if (key >= 'A' && key <= 'G') score_->TypePitch(char(key));
+    else if (key >= '1' && key <= '5') palette_->SetDuration(key - '1');
+    else if (key >= WXK_NUMPAD1 && key <= WXK_NUMPAD5) palette_->SetDuration(key - WXK_NUMPAD1);
+    else if (key == 'N' || key == WXK_ESCAPE) score_->SetNoteInput(false);
+    else if (key == '.' || key == WXK_NUMPAD_DECIMAL) palette_->ToggleDot();
+    else if (key == 'R') score_->TypeRest();
+    else if (key == '=') palette_->SetAccidental('#');
+    else if (key == '-') palette_->SetAccidental('b');
+    else if (key == '0') palette_->SetAccidental('n');
+    else if (key == WXK_LEFT) score_->MoveCaret(-1);
+    else if (key == WXK_RIGHT) score_->MoveCaret(1);
+    else if (key == WXK_UP) score_->ChangePitch(event.ShiftDown() ? 7 : 1);
+    else if (key == WXK_DOWN) score_->ChangePitch(event.ShiftDown() ? -7 : -1);
+    else if (key == WXK_TAB) score_->MoveStaff(event.ShiftDown() ? -1 : 1);
+    else if (key == WXK_BACK) score_->DeleteBack();
+    else if (key == WXK_DELETE) score_->DeleteAtCaret();
+    else event.Skip();
 }
 
 void MainFrame::Select(int bar, int staff) {
@@ -198,26 +308,27 @@ void MainFrame::OnTransport(TransportBar::Action action) {
             showHead_ = true;
             transport_->SetPlaying(playing_);
             if (playing_) {
-                clock_.Start();
+                engine_->Play();
                 timer_.Start(30);
             } else {
+                engine_->Pause();
                 timer_.Stop();
             }
             break;
         case TransportBar::Stop:
-        case TransportBar::Rewind: {
-            const bool stop = action == TransportBar::Stop;
-            if (stop) {
-                playing_ = false;
-                showHead_ = false;
-                timer_.Stop();
-                transport_->SetPlaying(false);
-            }
-            beats_ = 0;
-            clock_.Start();
+            playing_ = false;
+            showHead_ = false;
+            engine_->Stop();
+            timer_.Stop();
+            transport_->SetPlaying(false);
             Publish();
             break;
-        }
+        case TransportBar::Rewind:
+            engine_->Seek(0);
+            Publish();
+            break;
+        case TransportBar::Loop: engine_->SetLoop(transport_->IsLooping()); break;
+        case TransportBar::Click: engine_->SetClick(transport_->IsClickOn()); break;
         case TransportBar::ZoomIn: score_->SetZoom(score_->GetZoom() + 0.1); break;
         case TransportBar::ZoomOut: score_->SetZoom(score_->GetZoom() - 0.1); break;
         case TransportBar::ViewParts:
@@ -230,21 +341,16 @@ void MainFrame::OnTransport(TransportBar::Action action) {
 }
 
 void MainFrame::OnTick(wxTimerEvent&) {
-    beats_ += clock_.Time() / 1000.0 * kTempo / 60.0;
-    clock_.Start();
-    const double total = ScoreCanvas::kBars * ScoreCanvas::kBeatsPerBar;
-    if (beats_ >= total) {
-        if (transport_->IsLooping()) {
-            beats_ -= total;
-        } else {
-            OnTransport(TransportBar::Stop);
-            return;
-        }
+    // The engine stops itself at the end of the score unless looping.
+    if (!engine_->IsPlaying()) {
+        OnTransport(TransportBar::Stop);
+        return;
     }
     Publish();
 }
 
 void MainFrame::Publish() {
+    beats_ = engine_->Beats();
     score_->SetPlayhead(beats_, showHead_);
     timeline_->SetPlayhead(beats_, showHead_);
     const int beat = int(beats_);

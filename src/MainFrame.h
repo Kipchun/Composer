@@ -2,14 +2,17 @@
 #pragma once
 
 #include <wx/aui/aui.h>
-#include <wx/stopwatch.h>
 #include <wx/timer.h>
 
+#include <memory>
+
 #include "DirectorPanel.h"
+#include "InstrumentsWindow.h"
 #include "PalettePanel.h"
 #include "ScoreCanvas.h"
 #include "TimelinePanel.h"
 #include "TransportBar.h"
+#include "audio/AudioEngine.h"
 
 class MainFrame : public wxFrame {
 public:
@@ -25,6 +28,11 @@ private:
     void OnTick(wxTimerEvent&);
     void Publish();
     void Select(int bar, int staff);
+    void OnCharHook(wxKeyEvent& event);
+    void SyncInputValue();
+    void PushSchedule();
+    void ShowInstruments();
+    void OnClose(wxCloseEvent& event);
 
     wxAuiManager aui_;
     TransportBar* transport_ = nullptr;
@@ -32,9 +40,10 @@ private:
     ScoreCanvas* score_ = nullptr;
     TimelinePanel* timeline_ = nullptr;
     DirectorPanel* director_ = nullptr;
+    InstrumentsWindow* instruments_ = nullptr;
+    std::unique_ptr<AudioEngine> engine_;
 
     wxTimer timer_;
-    wxStopWatch clock_;
     double beats_ = 0;
     bool playing_ = false;
     bool showHead_ = false;

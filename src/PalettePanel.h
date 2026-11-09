@@ -10,7 +10,20 @@ class PalettePanel : public wxPanel {
 public:
     explicit PalettePanel(wxWindow* parent);
 
+    struct NoteInput {
+        double beats;  // includes the dot
+        bool rest;
+        char accidental;  // 0 if none
+    };
+
+    NoteInput GetNoteInput() const;
+    void SetDuration(int index);  // 0 whole ... 4 sixteenth
+    void ToggleDot();
+    void SetAccidental(char accidental);
+    void ClearAccidental();
+
     std::function<void(const wxString& tool)> onTool;
+    std::function<void()> onNoteInputChanged;
 
 private:
     enum class Face { Music, Serif, Plain };
@@ -32,7 +45,10 @@ private:
     void OnMotion(wxMouseEvent&);
     void OnLeftDown(wxMouseEvent&);
     bool FindItem(const wxPoint& p, int& section, int& item);
+    bool IsOn(int section, int item) const;
+    void NotifyInput();
 
     std::vector<Section> sections_;
     int hoverSection_ = -1, hoverItem_ = -1;
+    bool dotted_ = false, rest_ = false;
 };
