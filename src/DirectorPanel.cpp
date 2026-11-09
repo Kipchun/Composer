@@ -114,6 +114,13 @@ public:
         if (changed) Refresh();
     }
 
+    // The score left the preview on its own, so the card just goes back to waiting.
+    void PreviewEnded() {
+        for (Message& m : messages_)
+            if (m.card && m.cardState == CardState::Previewing) m.cardState = CardState::Pending;
+        Refresh();
+    }
+
     // Tells the model what happened to its proposals since it last spoke.
     wxString ProposalOutcomes() {
         wxString out;
@@ -181,7 +188,9 @@ private:
             double h = m.lines.size() * kLineH;
             h += m.user ? 18 : 24;  // bubble padding, or the sender label
             if (m.card) {
-                m.summaryLines = Wrap(*gc, m.proposal.summary, width - 2 * kPad - 24, UiFont(13));
+                const wxString body = m.proposal.details.empty() ? m.proposal.summary
+                                                                 : m.proposal.summary + "\n" + m.proposal.details;
+                m.summaryLines = Wrap(*gc, body, width - 2 * kPad - 24, UiFont(13));
                 m.cardH = 58 + m.summaryLines.size() * kSummaryH + 52;
                 h += m.cardH + 10;
             }
@@ -622,6 +631,8 @@ void DirectorPanel::ShowSampleConversation(const Proposal& proposal) {
     chat_->AddCard(proposal);
     SetScope(BarRange{});
 }
+
+void DirectorPanel::PreviewEnded() { chat_->PreviewEnded(); }
 
 void DirectorPanel::ScoreChanged() { chat_->CheckStale(score_, false); }
 

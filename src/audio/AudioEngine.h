@@ -26,17 +26,18 @@ public:
     // Returns the previous instrument so the UI thread, not the audio thread, frees it.
     std::unique_ptr<Instrument> SetInstrument(int track, std::unique_ptr<Instrument> instrument);
 
-    void SetSchedule(const std::vector<PlayNote>& notes, double totalBeats, const std::vector<double>& clickBeats);
+    // tempoPoints are (quarter-note position, bpm), sorted, starting at position 0.
+    void SetSchedule(const std::vector<PlayNote>& notes, double totalBeats, const std::vector<double>& clickBeats,
+                     const std::vector<std::pair<double, double>>& tempoPoints);
     void Play();
     void Pause();
     void Stop();
     void Seek(double beats);
     void SetLoop(bool on);
     void SetClick(bool on);
-    void SetTempo(double quartersPerMinute);
     void Preview(int track, int pitch);
 
-    double Beats() const;
+    double Beats();
     bool IsPlaying() const { return playing_; }
     float TakePeak(int track);  // level since the last call, 0 to 1
 
@@ -59,7 +60,11 @@ private:
     void Mix();
     void AddClick(int64_t start);
     void MoveCursor();
-    double SamplesPerBeat() const { return sampleRate_ * 60.0 / tempo_; }
+    struct TempoSegment {
+        double beat, sample, samplesPerBeat, bpm;
+    };
+    double BeatToSample(double beat) const;
+    double SampleToBeat(double sample) const;
 
     int tracks_;
     double sampleRate_ = 48000;
@@ -78,7 +83,8 @@ private:
     std::vector<Sounding> previews_, newPreviews_;
     int clickFrames_ = 0;
     double clickPhase_ = 0;
-    double tempo_ = 96;
+    std::vector<TempoSegment> tempoMap_;
+    double currentBpm_ = 96;
     std::vector<int64_t> clicks_;
 
     std::vector<float> mixL_, mixR_, trackL_, trackR_;

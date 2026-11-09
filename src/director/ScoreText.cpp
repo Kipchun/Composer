@@ -198,10 +198,9 @@ bool ParseBarText(const Project& project, int staff, int barIndex, const wxStrin
 wxString DescribeProject(const Project& project) {
     const ProjectSettings& s = project.settings;
     wxString out = "Title: " + s.title + "\n";
-    wxString key = KeyLabel(s.fifths, s.minor);
-    key.Replace(wxString(wxUniChar(0x266D)), "b");
-    key.Replace(wxString(wxUniChar(0x266F)), "#");
-    out += "Key: " + key + "\n";
+    if (!s.subtitle.empty()) out += "Subtitle: " + s.subtitle + "\n";
+    if (!s.composer.empty()) out += "Composer: " + s.composer + "\n";
+    out += "Key: " + PlainKeyLabel(s.fifths, s.minor) + "\n";
     out += wxString::Format("Time signature: %d/%d\n", s.timeTop, s.timeBottom);
     if (!project.meters.empty()) {
         out += "Time signature changes:";
@@ -210,7 +209,16 @@ wxString DescribeProject(const Project& project) {
     }
     out += wxString::Format("Tempo: quarter = %d", s.tempo);
     if (!s.tempoText.empty()) out += " (" + s.tempoText + ")";
-    out += wxString::Format("\nBars: %d\nStaves:", s.bars);
+    if (!project.tempos.empty()) {
+        out += "\nTempo changes:";
+        for (const TempoChange& t : project.tempos)
+            out += wxString::Format(" bar %d to %d", t.bar + 1, t.bpm) + (t.text.empty() ? wxString() : " (" + t.text + ")") + ";";
+    }
+    if (!project.sections.empty()) {
+        out += "\nRehearsal marks:";
+        for (const Section& section : project.sections) out += " " + section.label + wxString::Format(" at bar %d;", section.bar + 1);
+    }
+    out += wxString::Format("\nBars: %d (%d per line)\nStaves:", s.bars, s.barsPerLine);
     for (int staff = 0; staff < int(project.staves.size()); ++staff) out += "\n- " + StaffLabel(project, staff);
     return out;
 }
@@ -240,7 +248,7 @@ wxString BarsToText(const Project& project, int firstBar, int lastBar, const std
         }
         int top, bottom;
         project.MeterAt(bar, top, bottom);
-        out += wxString::Format("Bar %d (%d/%d)\n", bar + 1, top, bottom) + (lines.empty() ? wxString("  (all resting)\n") : lines);
+        out += wxString::Format("Bar %d (%d/%d, quarter = %d)\n", bar + 1, top, bottom, project.TempoAt(bar)) + (lines.empty() ? wxString("  (all resting)\n") : lines);
     }
     return out;
 }

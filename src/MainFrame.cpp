@@ -23,6 +23,7 @@ enum {
     ID_DirectorSettings,
     ID_DirectorNew,
     ID_MeterChange,
+    ID_TempoChange,
 };
 const char* const kFileFilter = "Composer projects (*.composer)|*.composer";
 const char* const kPaneDirector = "director";
@@ -85,6 +86,7 @@ void MainFrame::BuildMenus() {
     score->Append(ID_Instruments, "Instrument S&ounds... (I)");
     score->Append(ID_ProjectSettings, "Project &Settings...\tCtrl+Shift+P");
     score->Append(ID_MeterChange, "&Change Time Signature at Selection...\tCtrl+Shift+T");
+    score->Append(ID_TempoChange, "Change Te&mpo at Selection...\tCtrl+Shift+M");
 
     auto* playback = new wxMenu;
     playback->Append(wxID_ANY, "&Play / Pause (Space)");
@@ -114,6 +116,7 @@ void MainFrame::BuildMenus() {
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { EditSettings(); }, ID_ProjectSettings);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeInstruments(); }, ID_ChangeInstruments);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeMeter(); }, ID_MeterChange);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeTempo(); }, ID_TempoChange);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) {
         ShowDirectorSettings(this);
         director_->RefreshModelName();
@@ -237,7 +240,7 @@ void MainFrame::Connect() {
     score_->onAccidentalUsed = [this] { palette_->ClearAccidental(); };
     score_->onChanged = [this] {
         timeline_->ScoreChanged();
-        PushSchedule();
+        PushProjectInfo();
         SetModified(true);
         director_->ScoreChanged();
         Publish();
@@ -247,13 +250,20 @@ void MainFrame::Connect() {
     timeline_->SetScore(score_);
     SyncInputValue();
     director_->SetScore(score_);
+    score_->onPreviewEnded = [this] {
+        director_->PreviewEnded();
+        timeline_->ScoreChanged();
+        PushProjectInfo();
+        Publish();
+    };
     director_->onOpenSettings = [this] { ShowDirectorSettings(this); };
     director_->onProposal = [this](const Proposal* proposal, ProposalState state) {
         if (state == ProposalState::Preview) score_->ShowProposal(*proposal);
         else if (state == ProposalState::Applied) score_->ApplyProposal(*proposal);
         else score_->HideProposal();
-        timeline_->Refresh();
-        PushSchedule();
+        timeline_->ScoreChanged();
+        PushProjectInfo();
+        Publish();
         SetStatusText(state == ProposalState::Preview   ? "Previewing Director proposal"
                       : state == ProposalState::Applied ? "Director proposal applied. Ctrl+Z to undo."
                                                         : "Showing the original score",
@@ -263,7 +273,7 @@ void MainFrame::Connect() {
 }
 
 void MainFrame::PushSchedule() {
-    engine_->SetSchedule(score_->BuildPlayback(), score_->TotalBeats(), score_->ClickBeats());
+    engine_->SetSchedule(score_->BuildPlayback(), score_->TotalBeats(), score_->ClickBeats(), score_->TempoPoints());
 }
 
 void MainFrame::StopPlayback() {
@@ -271,7 +281,7 @@ void MainFrame::StopPlayback() {
 }
 
 void MainFrame::PushProjectInfo() {
-    const ProjectSettings& s = score_->GetProject().settings;
+    const ProjectSettings& s = score_->DisplayProject().settings;
     const wxString key = KeyLabel(s.fifths, s.minor);
     const wxString time = wxString::Format("%d/%d", s.timeTop, s.timeBottom);
     transport_->SetProjectInfo(s.tempo, key, time);
@@ -279,7 +289,6 @@ void MainFrame::PushProjectInfo() {
     SetStatusText(wxString::Format("%d bars  ", s.bars) + Glyph(0x00B7) +
                       wxString::Format("  %d staves", score_->StaffCount()),
                   2);
-    engine_->SetTempo(s.tempo);
     PushSchedule();
 }
 
@@ -412,6 +421,7 @@ bool MainFrame::SaveProject(bool chooseLocation) {
 }
 
 void MainFrame::ChangeInstruments() {
+    score_->EndPreview();
     const Project& project = score_->GetProject();
     std::vector<ScorePart> current;
     if (!PartsFromProject(project, current)) {
@@ -459,6 +469,7 @@ void MainFrame::ChangeInstruments() {
 }
 
 void MainFrame::EditSettings() {
+    score_->EndPreview();
     ProjectSettingsDialog dialog(this, score_->GetProject().settings);
     if (dialog.ShowModal() != wxID_OK) return;
 
@@ -565,7 +576,28 @@ void MainFrame::OnPaletteMark(char articulation, const wxString& dynamic, int ha
                   0);
 }
 
+void MainFrame::ChangeTempo() {
+    score_->EndPreview();
+    const Project& project = score_->GetProject();
+    const BarRange& range = score_->GetSelection();
+    const int bar = range.IsValid() ? range.firstBar : 0;
+
+    wxString text = bar == 0 ? project.settings.tempoText : wxString();
+    bool hasChange = false;
+    for (const TempoChange& change : project.tempos) {
+        if (change.bar == bar) {
+            text = change.text;
+            hasChange = true;
+        }
+    }
+    TempoDialog dialog(this, bar, project.TempoAt(bar), text, hasChange);
+    if (dialog.ShowModal() != wxID_OK) return;
+    score_->SetTempoChange(bar, dialog.Bpm(), dialog.Text(), dialog.RemoveRequested());
+    SetStatusText("Tempo updated. Ctrl+Z to undo.", 0);
+}
+
 void MainFrame::ChangeMeter() {
+    score_->EndPreview();
     const BarRange& range = score_->GetSelection();
     const int bar = range.IsValid() ? range.firstBar : 0;
     int top, bottom;
@@ -647,11 +679,12 @@ void MainFrame::Publish() {
     beats_ = engine_->Beats();
     score_->SetPlayhead(beats_, showHead_);
     timeline_->SetPlayhead(beats_, showHead_);
-    const Project& project = score_->GetProject();
+    const Project& project = score_->DisplayProject();
     const int bar = project.BarAtBeat(beats_);
     const int beat = int((beats_ - project.BarStart(bar)) / project.BeatUnit(bar) + 1e-6);
     transport_->SetPosition(bar + 1, beat + 1);
     int top, bottom;
     project.MeterAt(bar, top, bottom);
     transport_->SetTimeLabel(wxString::Format("%d/%d", top, bottom));
+    transport_->SetTempoValue(project.TempoAt(bar));
 }

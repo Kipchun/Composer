@@ -28,6 +28,7 @@ public:
     void ShowSampleConversation(const Proposal& proposal);
     void CancelRequest();
     void ScoreChanged();       // proposals may no longer match the score
+    void PreviewEnded();       // the score left a preview by itself
     void InvalidateProposals();  // staff numbering changed, so none can be applied
     void RefreshModelName();
 

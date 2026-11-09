@@ -29,6 +29,7 @@ private:
     void Publish();
     void Select(const BarRange& range);
     void ChangeMeter();
+    void ChangeTempo();
     void OnPaletteMark(char articulation, const wxString& dynamic, int hairpin);
     void OnCharHook(wxKeyEvent& event);
     void SyncInputValue();

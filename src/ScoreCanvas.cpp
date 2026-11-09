@@ -155,10 +155,11 @@ ScoreCanvas::ScoreCanvas(wxWindow* parent)
 }
 
 void ScoreCanvas::SetProject(const Project& project) {
+    previewBase_.reset();
+    preview_.clear();
     project_ = project;
     undo_.clear();
     redo_.clear();
-    ClearPreview();
     selection_ = BarRange{};
     playheadVisible_ = false;
     followSystem_ = -1;
@@ -186,6 +187,7 @@ bool ScoreCanvas::WouldLoseNotes(const ProjectSettings& next) const {
 }
 
 void ScoreCanvas::ApplySettings(const ProjectSettings& next) {
+    EndPreview();
     const int oldBars = BarCount();
     std::vector<double> oldBeats(oldBars);
     for (int bar = 0; bar < oldBars; ++bar) oldBeats[bar] = BarBeats(bar);
@@ -251,7 +253,28 @@ bool ScoreCanvas::WouldMeterLoseNotes(int bar, int top, int bottom) const {
     return false;
 }
 
+void ScoreCanvas::SetTempoChange(int bar, int bpm, const wxString& text, bool remove) {
+    EndPreview();
+    PushUndo();
+    auto& tempos = project_.tempos;
+    tempos.erase(std::remove_if(tempos.begin(), tempos.end(), [&](const TempoChange& t) { return t.bar == bar; }),
+                 tempos.end());
+    if (bar == 0) {
+        project_.settings.tempo = bpm;
+        project_.settings.tempoText = text;
+    } else if (!remove) {
+        TempoChange change;
+        change.bar = bar;
+        change.bpm = bpm;
+        change.text = text;
+        tempos.push_back(std::move(change));
+        std::sort(tempos.begin(), tempos.end(), [](const TempoChange& a, const TempoChange& b) { return a.bar < b.bar; });
+    }
+    Changed();
+}
+
 void ScoreCanvas::SetMeterChange(int bar, int top, int bottom) {
+    EndPreview();
     PushUndo();
     std::vector<double> oldBeats(BarCount());
     for (int b = 0; b < BarCount(); ++b) oldBeats[b] = BarBeats(b);
@@ -292,45 +315,36 @@ void ScoreCanvas::SetMeterChange(int bar, int top, int bottom) {
     Changed();
 }
 
-// Bars can shrink or disappear; marks outside them go, and hairpins end at the barline.
-void ScoreCanvas::FitMarksToBars() {
-    auto& marks = project_.markings;
-    marks.erase(std::remove_if(marks.begin(), marks.end(),
-                               [&](const Marking& m) { return m.bar >= BarCount() || m.beat >= BarBeats(m.bar) - kEps; }),
-                marks.end());
-    auto& pins = project_.hairpins;
-    pins.erase(std::remove_if(pins.begin(), pins.end(),
-                              [&](const Hairpin& h) { return h.bar >= BarCount() || h.beat >= BarBeats(h.bar) - kEps; }),
-               pins.end());
-    for (Hairpin& h : pins) {
-        if (h.endBar >= BarCount()) {
-            h.endBar = BarCount() - 1;
-            h.endBeat = BarBeats(h.endBar);
-        }
-        h.endBeat = std::min(h.endBeat, BarBeats(h.endBar));
-    }
-}
+void ScoreCanvas::FitMarksToBars() { project_.FitMarksToBars(); }
 
 ScoreCanvas::Snapshot ScoreCanvas::Capture() const {
-    return {score_, project_.meters, project_.markings, project_.hairpins, project_.settings.timeTop,
-            project_.settings.timeBottom};
+    return {score_, project_.settings, project_.meters, project_.tempos, project_.sections,
+            project_.markings, project_.hairpins, project_.slurs};
 }
 
 void ScoreCanvas::Restore(Snapshot snapshot) {
     score_ = std::move(snapshot.score);
+    project_.settings = std::move(snapshot.settings);
     project_.meters = std::move(snapshot.meters);
+    project_.tempos = std::move(snapshot.tempos);
+    project_.sections = std::move(snapshot.sections);
     project_.markings = std::move(snapshot.markings);
     project_.hairpins = std::move(snapshot.hairpins);
-    project_.settings.timeTop = snapshot.timeTop;
-    project_.settings.timeBottom = snapshot.timeBottom;
+    project_.slurs = std::move(snapshot.slurs);
+    LayoutPages();
+    UpdateVirtualSize();
+    if (selection_.firstBar >= BarCount()) selection_ = BarRange{};
+    else if (selection_.lastBar >= BarCount()) selection_.lastBar = BarCount() - 1;
+    if (caret_.bar >= BarCount()) caret_.bar = BarCount() - 1;
     if (caret_.bar >= 0 && caret_.beat >= BarBeats(caret_.bar)) caret_.beat = 0;
 }
 
 void ScoreCanvas::ClearPreview() {
     preview_.clear();
-    hasMarkPreview_ = false;
-    previewMarkings_.clear();
-    previewHairpins_.clear();
+    if (previewBase_) {
+        project_ = std::move(*previewBase_);
+        previewBase_.reset();
+    }
 }
 
 void ScoreCanvas::SetPendingMark(char articulation, const wxString& dynamic) {
@@ -361,6 +375,7 @@ void ScoreCanvas::ToggleDynamic(int staff, int bar, double beat, const wxString&
 
 bool ScoreCanvas::ApplyDynamicToSelection(const wxString& dynamic) {
     if (!selection_.IsValid()) return false;
+    EndPreview();
     PushUndo();
     const int first = selection_.firstStaff < 0 ? 0 : selection_.firstStaff;
     const int last = selection_.firstStaff < 0 ? StaffCount() - 1 : selection_.lastStaff;
@@ -379,6 +394,7 @@ bool ScoreCanvas::ApplyDynamicToSelection(const wxString& dynamic) {
 
 bool ScoreCanvas::ApplyHairpinToSelection(bool crescendo) {
     if (!selection_.IsValid()) return false;
+    EndPreview();
     PushUndo();
     const int first = selection_.firstStaff < 0 ? 0 : selection_.firstStaff;
     const int last = selection_.firstStaff < 0 ? StaffCount() - 1 : selection_.lastStaff;
@@ -403,6 +419,7 @@ bool ScoreCanvas::ApplyHairpinToSelection(bool crescendo) {
 
 bool ScoreCanvas::ToggleArticulationInSelection(char articulation) {
     if (!selection_.IsValid()) return false;
+    EndPreview();
     const int first = selection_.firstStaff < 0 ? 0 : selection_.firstStaff;
     const int last = selection_.firstStaff < 0 ? StaffCount() - 1 : selection_.lastStaff;
 
@@ -491,36 +508,47 @@ void ScoreCanvas::SetZoom(double zoom) {
 
 void ScoreCanvas::ShowProposal(const Proposal& proposal) {
     ClearPreview();
+    previewBase_ = std::make_unique<Project>(project_);
+    project_ = ProjectWithProposal(*previewBase_, proposal, true);
     for (const BarEdit& edit : proposal.edits) preview_[{edit.staff, edit.bar}] = edit.replacement;
-    previewMarkings_ = project_.markings;
-    previewHairpins_ = project_.hairpins;
-    ApplyMarkEdits(proposal, previewMarkings_, previewHairpins_, true);
-    hasMarkPreview_ = true;
-    ComputeLayout();
-    Refresh();
+    RefreshLayout();
 }
 
 void ScoreCanvas::HideProposal() {
     ClearPreview();
-    ComputeLayout();
-    Refresh();
+    RefreshLayout();
+}
+
+void ScoreCanvas::EndPreview() {
+    if (!previewBase_) return;
+    ClearPreview();
+    RefreshLayout();
+    if (onPreviewEnded) onPreviewEnded();
 }
 
 bool ScoreCanvas::IsProposalStale(const Proposal& proposal) const {
+    const Project& base = GetProject();
+    if (!proposal.meterKey.empty() && proposal.meterKey != MeterKey(base)) return true;
     for (const BarEdit& edit : proposal.edits) {
-        if (edit.staff >= StaffCount() || edit.bar >= BarCount() ||
-            !BarsEqual(score_[edit.staff][edit.bar], edit.original))
-            return true;
+        if (edit.staff >= int(base.staves.size())) return true;
+        if (edit.bar >= base.settings.bars) {
+            if (!proposal.bars) return true;
+            continue;
+        }
+        if (!BarsEqual(base.score[edit.staff][edit.bar], edit.original)) return true;
     }
     return false;
 }
 
 void ScoreCanvas::ApplyProposal(const Proposal& proposal) {
-    if (IsProposalStale(proposal)) return;
-    PushUndo();
-    for (const BarEdit& edit : proposal.edits) score_[edit.staff][edit.bar] = edit.replacement;
-    ApplyMarkEdits(proposal, project_.markings, project_.hairpins, false);
     ClearPreview();
+    if (IsProposalStale(proposal)) {
+        RefreshLayout();
+        return;
+    }
+    PushUndo();
+    project_ = ProjectWithProposal(project_, proposal, false);
+    RefreshLayout();
     Changed();
 }
 
@@ -869,6 +897,18 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
     for (int bar = firstBar; bar < endBar; ++bar)
         DrawTextAt(gc, wxString::Format("%d", bar + 1), BarX(bar) + 3, firstTop - 24,
                    SerifFont(12, false, true), kMuted);
+
+    for (const TempoChange& t : project_.tempos) {
+        if (t.bar < firstBar || t.bar >= endBar) continue;
+        const wxColour& ink = t.proposed ? kProposal : kInk;
+        const wxFont font = SerifFont(14, true);
+        double x = BarX(t.bar) + (t.bar == firstBar ? 28 : 3);
+        if (!t.text.empty()) {
+            DrawTextAt(gc, t.text, x, firstTop - 46, font, ink);
+            x += TextWidth(gc, t.text, font) + 8;
+        }
+        DrawTextAt(gc, Glyph(0x2669) + wxString::Format(" = %d", t.bpm), x, firstTop - 47, MusicFont(14), ink);
+    }
 
     for (const Section& section : project_.sections) {
         if (section.bar < firstBar || section.bar >= endBar) continue;
@@ -1283,8 +1323,8 @@ double ScoreCanvas::WrittenLength(int bar, double beat) const {
 }
 
 bool ScoreCanvas::CanEdit(int staff, int bar) {
-    if (IsProposalBar(staff, bar)) {
-        if (onInputStatus) onInputStatus("Hide or apply the Director's preview to edit these bars");
+    if (previewBase_) {
+        if (onInputStatus) onInputStatus("Hide or apply the Director's preview to keep editing");
         return false;
     }
     return true;
@@ -1355,6 +1395,7 @@ void ScoreCanvas::WriteRange(int staff, int bar, double start, double length, co
 }
 
 void ScoreCanvas::ClickNote(const Target& t) {
+    if (!CanEdit(t.staff, t.bar)) return;
     if (!pendingDynamic_.empty()) {
         PushUndo();
         ToggleDynamic(t.staff, t.bar, t.beat, pendingDynamic_);
@@ -1509,6 +1550,7 @@ void ScoreCanvas::SetInputValue(double beats, bool rest, char accidental) {
 }
 
 void ScoreCanvas::TypePitch(char letter) {
+    if (!CanEdit(caret_.staff, caret_.bar)) return;
     if (!pendingDynamic_.empty()) {
         PushUndo();
         ToggleDynamic(caret_.staff, caret_.bar, caret_.beat, pendingDynamic_);
@@ -1590,6 +1632,7 @@ void ScoreCanvas::MoveStaff(int direction) {
 }
 
 void ScoreCanvas::ChangePitch(int steps) {
+    if (!CanEdit(caret_.staff, caret_.bar)) return;
     if (lastEntered_.bar < 0) {
         caret_.step = std::clamp(caret_.step + steps, -kMaxStep, kMaxStep);
         Refresh();
@@ -1635,6 +1678,7 @@ void ScoreCanvas::DeleteAtCaret() {
 }
 
 void ScoreCanvas::Undo() {
+    EndPreview();
     if (undo_.empty()) return;
     redo_.push_back(Capture());
     Restore(std::move(undo_.back()));
@@ -1644,12 +1688,19 @@ void ScoreCanvas::Undo() {
 }
 
 void ScoreCanvas::Redo() {
+    EndPreview();
     if (redo_.empty()) return;
     undo_.push_back(Capture());
     Restore(std::move(redo_.back()));
     redo_.pop_back();
     lastEntered_ = Target{};
     Changed();
+}
+
+std::vector<std::pair<double, double>> ScoreCanvas::TempoPoints() const {
+    std::vector<std::pair<double, double>> points = {{0.0, double(project_.settings.tempo)}};
+    for (const TempoChange& t : project_.tempos) points.emplace_back(project_.BarStart(t.bar), double(t.bpm));
+    return points;
 }
 
 std::vector<double> ScoreCanvas::ClickBeats() const {

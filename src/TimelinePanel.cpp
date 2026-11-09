@@ -60,7 +60,7 @@ void TimelinePanel::OnPaint(wxPaintEvent&) {
     const wxPoint origin = CalcScrolledPosition(wxPoint(0, 0));
     gc->Translate(origin.x, origin.y);
 
-    const Project& project = score_->GetProject();
+    const Project& project = score_->DisplayProject();
     const double barW = BarWidth();
     const int bars = score_->BarCount();
     const int rows = score_->StaffCount();

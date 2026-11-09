@@ -16,6 +16,7 @@ public:
     void SetPosition(int bar, int beat);
     void SetZoomPercent(int percent);
     void SetTimeLabel(const wxString& time);
+    void SetTempoValue(int bpm);
     void SetProjectInfo(int tempo, const wxString& key, const wxString& time);
     bool IsLooping() const { return loop_; }
     bool IsClickOn() const { return click_; }

@@ -131,6 +131,42 @@ MeterDialog::MeterDialog(wxWindow* parent, int bar, int top, int bottom)
     CentreOnParent();
 }
 
+TempoDialog::TempoDialog(wxWindow* parent, int bar, int bpm, const wxString& text, bool hasChange)
+    : wxDialog(parent, wxID_ANY, "Tempo") {
+    SetBackgroundColour(kPanel);
+    bpm_ = new wxSpinCtrl(this, wxID_ANY, "", wxDefaultPosition, wxSize(90, -1), wxSP_ARROW_KEYS, 20, 300, bpm);
+    text_ = new wxTextCtrl(this, wxID_ANY, text);
+    text_->SetHint("Optional, such as Allegro");
+
+    auto* grid = new wxFlexGridSizer(2, 8, 12);
+    grid->AddGrowableCol(1, 1);
+    grid->Add(Label(this, "Quarter note ="), 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(bpm_);
+    grid->Add(Label(this, "Text"), 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(text_, 1, wxEXPAND);
+
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    sizer->Add(Label(this, wxString::Format("From bar %d until the next tempo change:", bar + 1), kText), 0, wxALL, 16);
+    sizer->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    if (hasChange) {
+        auto* remove = new wxButton(this, wxID_ANY, "Remove Change");
+        remove->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            remove_ = true;
+            EndModal(wxID_OK);
+        });
+        buttons->Add(remove);
+    }
+    buttons->AddStretchSpacer();
+    buttons->Add(new wxButton(this, wxID_OK, "OK"), 0, wxRIGHT, 8);
+    buttons->Add(new wxButton(this, wxID_CANCEL, "Cancel"));
+    sizer->Add(buttons, 0, wxEXPAND | wxALL, 16);
+    SetSizerAndFit(sizer);
+    SetMinSize(wxSize(360, -1));
+    Fit();
+    CentreOnParent();
+}
+
 InstrumentPicker::InstrumentPicker(wxWindow* parent) : wxPanel(parent) {
     SetBackgroundColour(kPanel);
 

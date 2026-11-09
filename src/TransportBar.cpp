@@ -30,6 +30,12 @@ void TransportBar::SetProjectInfo(int tempo, const wxString& key, const wxString
     Refresh();
 }
 
+void TransportBar::SetTempoValue(int bpm) {
+    if (bpm == tempoValue_) return;
+    tempoValue_ = bpm;
+    Refresh();
+}
+
 void TransportBar::SetTimeLabel(const wxString& time) {
     if (time == timeLabel_) return;
     timeLabel_ = time;

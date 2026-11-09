@@ -172,6 +172,17 @@ void AudioEngine::RenderBlock() {
     newPreviews_.clear();
 
     const int64_t start = position_;
+    if (!tempoMap_.empty()) {
+        // Plugins follow the tempo at the current position.
+        double bpm = tempoMap_[0].bpm;
+        for (const TempoSegment& segment : tempoMap_)
+            if (segment.sample <= double(start)) bpm = segment.bpm;
+        if (bpm != currentBpm_) {
+            currentBpm_ = bpm;
+            for (auto& instrument : instruments_)
+                if (instrument) instrument->SetTempo(bpm);
+        }
+    }
     std::fill(mixL_.begin(), mixL_.end(), 0.f);
     std::fill(mixR_.begin(), mixR_.end(), 0.f);
 
@@ -241,7 +252,7 @@ void AudioEngine::AddClick(int64_t start) {
 std::unique_ptr<Instrument> AudioEngine::SetInstrument(int track,
                                                        std::unique_ptr<Instrument> instrument) {
     std::lock_guard<std::mutex> guard(lock_);
-    if (instrument) instrument->SetTempo(tempo_);
+    if (instrument) instrument->SetTempo(currentBpm_);
     std::swap(instruments_[track], instrument);
     active_[track].fill(false);
     return instrument;
@@ -254,14 +265,44 @@ void AudioEngine::MoveCursor() {
                      schedule_.begin());
 }
 
+double AudioEngine::BeatToSample(double beat) const {
+    if (tempoMap_.empty()) return 0;
+    const TempoSegment* segment = &tempoMap_[0];
+    for (const TempoSegment& candidate : tempoMap_)
+        if (candidate.beat <= beat) segment = &candidate;
+    return segment->sample + (beat - segment->beat) * segment->samplesPerBeat;
+}
+
+double AudioEngine::SampleToBeat(double sample) const {
+    if (tempoMap_.empty()) return 0;
+    const TempoSegment* segment = &tempoMap_[0];
+    for (const TempoSegment& candidate : tempoMap_)
+        if (candidate.sample <= sample) segment = &candidate;
+    return segment->beat + (sample - segment->sample) / segment->samplesPerBeat;
+}
+
 void AudioEngine::SetSchedule(const std::vector<PlayNote>& notes, double totalBeats,
-                              const std::vector<double>& clickBeats) {
-    const double perBeat = SamplesPerBeat();
+                              const std::vector<double>& clickBeats,
+                              const std::vector<std::pair<double, double>>& tempoPoints) {
+    std::lock_guard<std::mutex> guard(lock_);
+
+    // Stay at the same musical position if the tempo map changes under playback.
+    const double musicalPosition = SampleToBeat(double(position_.load()));
+
+    tempoMap_.clear();
+    double sample = 0, lastBeat = 0, spb = 0;
+    for (const auto& point : tempoPoints) {
+        if (!tempoMap_.empty()) sample += (point.first - lastBeat) * spb;
+        spb = sampleRate_ * 60.0 / point.second;
+        tempoMap_.push_back({point.first, sample, spb, point.second});
+        lastBeat = point.first;
+    }
+
     std::vector<Scheduled> schedule;
     schedule.reserve(notes.size() * 2);
     for (const PlayNote& n : notes) {
-        const int64_t on = int64_t(n.beat * perBeat);
-        const int64_t off = on + int64_t(n.length * 0.95 * perBeat);
+        const int64_t on = int64_t(BeatToSample(n.beat));
+        const int64_t off = int64_t(BeatToSample(n.beat + n.length * 0.95));
         schedule.push_back({on, n.staff, n.midi, true, n.velocity});
         schedule.push_back({off, n.staff, n.midi, false, 0.f});
     }
@@ -270,14 +311,14 @@ void AudioEngine::SetSchedule(const std::vector<PlayNote>& notes, double totalBe
         return a.sample != b.sample ? a.sample < b.sample : !a.on && b.on;
     });
 
-    std::vector<int64_t> clicks;
-    clicks.reserve(clickBeats.size());
-    for (double beat : clickBeats) clicks.push_back(int64_t(std::llround(beat * perBeat)));
+    clicks_.clear();
+    clicks_.reserve(clickBeats.size());
+    for (double beat : clickBeats) clicks_.push_back(int64_t(std::llround(BeatToSample(beat))));
 
-    std::lock_guard<std::mutex> guard(lock_);
     schedule_ = std::move(schedule);
-    clicks_ = std::move(clicks);
-    totalSamples_ = int64_t(totalBeats * perBeat);
+    totalSamples_ = int64_t(BeatToSample(totalBeats));
+    position_ = int64_t(BeatToSample(musicalPosition));
+    if (position_ >= totalSamples_) position_ = 0;
     MoveCursor();
     if (playing_) allOff_ = true;  // a sounding note's release may no longer exist
 }
@@ -304,7 +345,7 @@ void AudioEngine::Stop() {
 
 void AudioEngine::Seek(double beats) {
     std::lock_guard<std::mutex> guard(lock_);
-    position_ = int64_t(beats * SamplesPerBeat());
+    position_ = int64_t(BeatToSample(beats));
     MoveCursor();
     allOff_ = true;
 }
@@ -319,21 +360,15 @@ void AudioEngine::SetClick(bool on) {
     click_ = on;
 }
 
-void AudioEngine::SetTempo(double quartersPerMinute) {
-    std::lock_guard<std::mutex> guard(lock_);
-    // Stay at the same musical position when the speed changes.
-    position_ = int64_t(position_ * tempo_ / quartersPerMinute);
-    tempo_ = quartersPerMinute;
-    for (auto& instrument : instruments_)
-        if (instrument) instrument->SetTempo(tempo_);
-}
-
 void AudioEngine::Preview(int track, int pitch) {
     std::lock_guard<std::mutex> guard(lock_);
     if (pitch < 0 || pitch > 127 || !instruments_[track]) return;
     newPreviews_.push_back({track, pitch, kPreviewFrames});
 }
 
-double AudioEngine::Beats() const { return position_ / SamplesPerBeat(); }
+double AudioEngine::Beats() {
+    std::lock_guard<std::mutex> guard(lock_);
+    return SampleToBeat(double(position_.load()));
+}
 
 float AudioEngine::TakePeak(int track) { return peaks_[track].exchange(0.f); }

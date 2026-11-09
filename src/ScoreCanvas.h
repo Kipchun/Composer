@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <vector>
 
 #include "Project.h"
@@ -18,19 +19,28 @@ public:
     explicit ScoreCanvas(wxWindow* parent);
 
     void SetProject(const Project& project);
-    const Project& GetProject() const { return project_; }
+    // The document itself. During a preview this is what's saved and sent to the Director.
+    const Project& GetProject() const { return previewBase_ ? *previewBase_ : project_; }
+    // What's on screen and playing, which includes any previewed proposal.
+    const Project& DisplayProject() const { return project_; }
+    // Leaves a preview so an edit can go ahead; onPreviewEnded tells the Director.
+    void EndPreview();
+    std::function<void()> onPreviewEnded;
     // Changes tempo, key, meter and so on; notes that no longer fit are removed.
     void ApplySettings(const ProjectSettings& settings);
     bool WouldLoseNotes(const ProjectSettings& settings) const;
     // A time signature from `bar` until the next change. Undoable.
     void SetMeterChange(int bar, int top, int bottom);
     bool WouldMeterLoseNotes(int bar, int top, int bottom) const;
+    // A tempo from `bar` until the next change; remove clears one. Undoable.
+    void SetTempoChange(int bar, int bpm, const wxString& text, bool remove);
 
     int BarCount() const { return project_.settings.bars; }
     int StaffCount() const { return int(project_.staves.size()); }
     double BarBeats(int bar) const { return project_.BarBeats(bar); }
     double TotalBeats() const { return project_.TotalBeats(); }
     std::vector<double> ClickBeats() const;
+    std::vector<std::pair<double, double>> TempoPoints() const;  // quarter-note position -> bpm
     wxString StaffName(int staff) const;
 
     // Preview draws and plays the proposal without changing the score.
@@ -108,8 +118,8 @@ private:
     void FitMarksToBars();
     void ClearPendingMark();
     void ToggleDynamic(int staff, int bar, double beat, const wxString& dynamic);
-    const std::vector<Marking>& EffectiveMarkings() const { return hasMarkPreview_ ? previewMarkings_ : project_.markings; }
-    const std::vector<Hairpin>& EffectiveHairpins() const { return hasMarkPreview_ ? previewHairpins_ : project_.hairpins; }
+    const std::vector<Marking>& EffectiveMarkings() const { return project_.markings; }
+    const std::vector<Hairpin>& EffectiveHairpins() const { return project_.hairpins; }
     bool ToPage(const wxPoint& client, double& x, double& y, int& page) const;
     double WrittenLength(int bar, double beat) const;
     bool CanEdit(int staff, int bar);
@@ -158,18 +168,19 @@ private:
     int pageCount_ = 1;
     struct Snapshot {
         Score score;
+        ProjectSettings settings;
         std::vector<MeterChange> meters;
+        std::vector<TempoChange> tempos;
+        std::vector<Section> sections;
         std::vector<Marking> markings;
         std::vector<Hairpin> hairpins;
-        int timeTop = 4, timeBottom = 4;
+        std::vector<Slur> slurs;
     };
     Snapshot Capture() const;
     void Restore(Snapshot snapshot);
     std::vector<Snapshot> undo_, redo_;
     std::map<std::pair<int, int>, Bar> preview_;  // (staff, bar) -> proposed contents
-    bool hasMarkPreview_ = false;
-    std::vector<Marking> previewMarkings_;
-    std::vector<Hairpin> previewHairpins_;
+    std::unique_ptr<Project> previewBase_;  // the real document while project_ shows a preview
 
     double zoom_ = 0.8;
     double playhead_ = 0;

@@ -16,7 +16,11 @@ const char* const kSystemPrompt = R"(You are the Director, a composer's assistan
 
 Each message begins with the project's current state and the user's selection. If they say "this" or "here", they mean the selection. Use read_score whenever you need bars you haven't been shown.
 
-To change the music, call propose_edit. The user hears and reviews your proposal before anything changes, so describe what you did in its summary and don't ask permission first. For questions and discussion, just answer. Change only what was asked, and leave other bars and staves alone unless the request calls for them. You can edit notes, articulations, dynamics and hairpins. If asked to change tempo, key, time signature or the instrument list, say that you can't do that yet.
+To change the piece, call propose_edit. The user hears and reviews your proposal before anything changes, so describe what you did in its summary and don't ask permission first. For questions and discussion, just answer. Change only what was asked, and leave other bars and staves alone unless the request calls for them.
+
+One proposal can change many staves and bars together, and should: put a whole orchestration, or a rewrite plus its tempo or meter change, in a single call so the user reviews it as one idea. Use staves in place of staff to write identical content on several staves. You can edit notes, articulations, dynamics, hairpins, time signatures, tempo and tempo changes, the key, rehearsal marks, the number of bars, bars per line, and the title, subtitle and composer. If asked to change the instrument list, say that you can't do that yet.
+
+Bar numbers in a proposal always refer to the piece as it will be after the proposal. If a time signature change makes a bar shorter and that bar has music, rewrite that bar in the same proposal. Changing the key keeps notes on the same staff lines, so their pitches change; to keep or transpose the music, rewrite the bars in the same proposal.
 
 Notation used by read_score and propose_edit:
 - A bar is a space-separated list of tokens: duration:pitches
@@ -64,10 +68,11 @@ json Tools() {
                 "type": "object",
                 "properties": {
                   "staff": {"type": "string", "description": "Staff name exactly as listed in the project."},
+                  "staves": {"type": "array", "items": {"type": "string"}, "description": "Use instead of staff to write the same notes on several staves."},
                   "bar": {"type": "integer", "description": "Bar number, from 1."},
                   "notes": {"type": "string", "description": "The complete new contents of the bar."}
                 },
-                "required": ["staff", "bar", "notes"]
+                "required": ["bar", "notes"]
               }
             },
             "dynamics": {
@@ -77,11 +82,12 @@ json Tools() {
                 "type": "object",
                 "properties": {
                   "staff": {"type": "string"},
+                  "staves": {"type": "array", "items": {"type": "string"}},
                   "bar": {"type": "integer"},
                   "beat": {"type": "number"},
                   "mark": {"type": "string", "enum": ["pp", "p", "mp", "mf", "f", "ff", "none"]}
                 },
-                "required": ["staff", "bar", "beat", "mark"]
+                "required": ["bar", "beat", "mark"]
               }
             },
             "hairpins": {
@@ -91,13 +97,67 @@ json Tools() {
                 "type": "object",
                 "properties": {
                   "staff": {"type": "string"},
+                  "staves": {"type": "array", "items": {"type": "string"}},
                   "start_bar": {"type": "integer"},
                   "start_beat": {"type": "number"},
                   "end_bar": {"type": "integer"},
                   "end_beat": {"type": "number", "description": "Where it ends; one past the last beat means the end of the bar."},
                   "type": {"type": "string", "enum": ["crescendo", "diminuendo", "none"]}
                 },
-                "required": ["staff", "start_bar", "start_beat", "end_bar", "end_beat", "type"]
+                "required": ["start_bar", "start_beat", "end_bar", "end_beat", "type"]
+              }
+            },
+            "time_signatures": {
+              "type": "array",
+              "description": "Set or remove a time signature from a bar until the next one. Bar 1 sets the opening and can't be removed.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "bar": {"type": "integer"},
+                  "top": {"type": "integer", "description": "1 to 16."},
+                  "bottom": {"type": "integer", "enum": [2, 4, 8]},
+                  "remove": {"type": "boolean"}
+                },
+                "required": ["bar"]
+              }
+            },
+            "tempos": {
+              "type": "array",
+              "description": "Set or remove a tempo from a bar until the next one. Bar 1 sets the opening tempo and can't be removed.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "bar": {"type": "integer"},
+                  "bpm": {"type": "integer", "description": "Quarter notes per minute, 20 to 300."},
+                  "text": {"type": "string", "description": "Optional, such as Allegro."},
+                  "remove": {"type": "boolean"}
+                },
+                "required": ["bar"]
+              }
+            },
+            "rehearsal_marks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "bar": {"type": "integer"},
+                  "label": {"type": "string", "description": "Short, usually one letter."},
+                  "remove": {"type": "boolean"}
+                },
+                "required": ["bar"]
+              }
+            },
+            "project": {
+              "type": "object",
+              "description": "Overall settings. Include only what should change.",
+              "properties": {
+                "title": {"type": "string"},
+                "subtitle": {"type": "string"},
+                "composer": {"type": "string"},
+                "tempo_text": {"type": "string"},
+                "key": {"type": "string", "description": "Such as Eb major or F# minor."},
+                "bars": {"type": "integer", "description": "New total bars, 1 to 2000. Bars with music can't be removed this way."},
+                "bars_per_line": {"type": "integer", "description": "1 to 8."}
               }
             }
           },
@@ -338,49 +398,17 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
         error = "A title is required.";
         return false;
     }
+
     const auto listOf = [&](const char* name) {
         return input.contains(name) && input[name].is_array() ? input[name] : json::array();
     };
     const json changes = listOf("changes"), dynamics = listOf("dynamics"), hairpins = listOf("hairpins");
-    if (changes.empty() && dynamics.empty() && hairpins.empty()) {
-        error = "Include at least one of changes, dynamics or hairpins.";
+    const json meters = listOf("time_signatures"), tempos = listOf("tempos"), marks = listOf("rehearsal_marks");
+    const json settings = input.contains("project") && input["project"].is_object() ? input["project"] : json::object();
+    if (changes.empty() && dynamics.empty() && hairpins.empty() && meters.empty() && tempos.empty() && marks.empty() &&
+        settings.empty()) {
+        error = "The proposal doesn't change anything.";
         return false;
-    }
-
-    // Collect every problem so one correction round is enough.
-    wxString problems;
-    std::set<std::pair<int, int>> seen;
-    for (const json& change : changes) {
-        const wxString staffName = Utf8Field(change, "staff");
-        const int staff = FindStaffByName(project, staffName);
-        const bool hasBar = change.contains("bar") && change["bar"].is_number_integer();
-        const int barNumber = hasBar ? change["bar"].get<int>() : 0;
-        const wxString where = wxString::Format("Bar %d, ", barNumber) + staffName + ": ";
-
-        if (staff < 0) {
-            problems += "There is no staff named \"" + staffName + "\".\n";
-            continue;
-        }
-        if (barNumber < 1 || barNumber > project.settings.bars) {
-            problems += wxString::Format("Bar %d doesn't exist; the score has %d bars.\n", barNumber, project.settings.bars);
-            continue;
-        }
-        const int bar = barNumber - 1;
-        if (!seen.insert({staff, bar}).second) {
-            problems += where + "changed more than once.\n";
-            continue;
-        }
-
-        BarEdit edit;
-        edit.staff = staff;
-        edit.bar = bar;
-        edit.original = project.score[staff][bar];
-        wxString why;
-        if (!ParseBarText(project, staff, bar, Utf8Field(change, "notes"), edit.replacement, &why)) {
-            problems += where + why + ".\n";
-            continue;
-        }
-        out.edits.push_back(std::move(edit));
     }
 
     const auto numberField = [](const json& object, const char* name, double fallback) {
@@ -389,60 +417,237 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
     const auto intField = [](const json& object, const char* name) {
         return object.contains(name) && object[name].is_number_integer() ? object[name].get<int>() : 0;
     };
+    const auto isRemoval = [](const json& object) { return object.value("remove", false); };
+
+    wxString problems, details;
+    const auto note = [&](const wxString& line) { details += (details.empty() ? "" : "\n") + line; };
+
+    // Staves named by either form, reporting any that don't exist.
+    const auto stavesOf = [&](const json& entry) {
+        std::vector<int> staves;
+        const auto add = [&](const wxString& name) {
+            const int staff = FindStaffByName(project, name);
+            if (staff < 0) problems += "There is no staff named \"" + name + "\".\n";
+            else if (std::find(staves.begin(), staves.end(), staff) == staves.end()) staves.push_back(staff);
+        };
+        if (entry.contains("staff") && entry["staff"].is_string()) add(Utf8Field(entry, "staff"));
+        if (entry.contains("staves") && entry["staves"].is_array())
+            for (const json& name : entry["staves"])
+                if (name.is_string()) add(wxString::FromUTF8(name.get<std::string>()));
+        if (staves.empty() && !entry.contains("staff") && !entry.contains("staves"))
+            problems += "An entry names no staff.\n";
+        return staves;
+    };
+
+    // Whole-project settings come first, so bars can be checked against the result.
+    if (settings.contains("title")) { out.title_ = Utf8Field(settings, "title"); note("Title: " + *out.title_); }
+    if (settings.contains("subtitle")) { out.subtitle = Utf8Field(settings, "subtitle"); note("Subtitle: " + *out.subtitle); }
+    if (settings.contains("composer")) { out.composer = Utf8Field(settings, "composer"); note("Composer: " + *out.composer); }
+    if (settings.contains("tempo_text")) { out.tempoText = Utf8Field(settings, "tempo_text"); note("Tempo text: " + *out.tempoText); }
+    if (settings.contains("key")) {
+        const wxString wanted = Utf8Field(settings, "key");
+        bool found = false;
+        for (int minor = 0; minor < 2 && !found; ++minor) {
+            for (int fifths = -7; fifths <= 7 && !found; ++fifths) {
+                if (PlainKeyLabel(fifths, minor != 0).CmpNoCase(wanted) == 0) {
+                    out.fifths = fifths;
+                    out.minor = minor != 0;
+                    found = true;
+                }
+            }
+        }
+        if (found) note("Key: " + wanted);
+        else problems += "\"" + wanted + "\" is not a key; use a name like Eb major or F# minor.\n";
+    }
+    if (settings.contains("bars")) {
+        const int bars = intField(settings, "bars");
+        if (bars < 1 || bars > 2000) problems += "bars must be 1 to 2000.\n";
+        else {
+            out.bars = bars;
+            note(wxString::Format("Length: %d bars", bars));
+        }
+    }
+    if (settings.contains("bars_per_line")) {
+        const int perLine = intField(settings, "bars_per_line");
+        if (perLine < 1 || perLine > 8) problems += "bars_per_line must be 1 to 8.\n";
+        else {
+            out.barsPerLine = perLine;
+            note(wxString::Format("%d bars per line", perLine));
+        }
+    }
+
+    const int barTotal = out.bars.value_or(project.settings.bars);
+    for (const json& entry : meters) {
+        const int bar = intField(entry, "bar") - 1;
+        if (bar < 0 || bar >= barTotal) {
+            problems += wxString::Format("Time signature at bar %d is out of range.\n", bar + 1);
+        } else if (isRemoval(entry)) {
+            if (bar == 0) problems += "The opening time signature can't be removed; set a different one.\n";
+            else {
+                out.removedMeters.push_back(bar);
+                note(wxString::Format("Remove time signature at bar %d", bar + 1));
+            }
+        } else {
+            const int top = intField(entry, "top"), bottom = intField(entry, "bottom");
+            if (top < 1 || top > 16 || (bottom != 2 && bottom != 4 && bottom != 8)) {
+                problems += wxString::Format("Time signature at bar %d needs top 1 to 16 and bottom 2, 4 or 8.\n", bar + 1);
+            } else {
+                out.setMeters.push_back({bar, top, bottom});
+                note(wxString::Format("%d/%d from bar %d", top, bottom, bar + 1));
+            }
+        }
+    }
+    for (const json& entry : tempos) {
+        const int bar = intField(entry, "bar") - 1;
+        if (bar < 0 || bar >= barTotal) {
+            problems += wxString::Format("Tempo at bar %d is out of range.\n", bar + 1);
+        } else if (isRemoval(entry)) {
+            if (bar == 0) problems += "The opening tempo can't be removed; set a different one.\n";
+            else {
+                out.removedTempos.push_back(bar);
+                note(wxString::Format("Remove tempo change at bar %d", bar + 1));
+            }
+        } else {
+            TempoChange change;
+            change.bar = bar;
+            change.bpm = intField(entry, "bpm");
+            change.text = Utf8Field(entry, "text");
+            if (change.bpm < 20 || change.bpm > 300) {
+                problems += wxString::Format("Tempo at bar %d needs bpm from 20 to 300.\n", bar + 1);
+            } else {
+                note(wxString::Format("Tempo %d from bar %d", change.bpm, bar + 1));
+                out.setTempos.push_back(std::move(change));
+            }
+        }
+    }
+    for (const json& entry : marks) {
+        const int bar = intField(entry, "bar") - 1;
+        const wxString label = Utf8Field(entry, "label");
+        if (bar < 0 || bar >= barTotal) problems += wxString::Format("Rehearsal mark at bar %d is out of range.\n", bar + 1);
+        else if (isRemoval(entry)) { out.removedSections.push_back(bar); note(wxString::Format("Remove rehearsal mark at bar %d", bar + 1)); }
+        else if (label.empty()) problems += wxString::Format("Rehearsal mark at bar %d needs a label.\n", bar + 1);
+        else { out.setSections.push_back({bar, label}); note("Rehearsal mark " + label + wxString::Format(" at bar %d", bar + 1)); }
+    }
+
+    if (!problems.empty()) {
+        error = "The proposal was not shown. Fix these and call propose_edit again with everything:\n" + problems;
+        return false;
+    }
+
+    // Notes and marks are checked against the piece as it will be.
+    const Project probe = ProjectWithProposal(project, out, false);
+
+    std::set<std::pair<int, int>> seen;
+    int minBar = probe.settings.bars, maxBar = -1;
+    std::set<int> touchedStaves;
+    for (const json& change : changes) {
+        const std::vector<int> staves = stavesOf(change);
+        const int barNumber = intField(change, "bar");
+        if (barNumber < 1 || barNumber > probe.settings.bars) {
+            problems += wxString::Format("Bar %d doesn't exist; the score will have %d bars.\n", barNumber, probe.settings.bars);
+            continue;
+        }
+        const int bar = barNumber - 1;
+        for (int staff : staves) {
+            const wxString where = wxString::Format("Bar %d, ", barNumber) + StaffLabel(project, staff) + ": ";
+            if (!seen.insert({staff, bar}).second) {
+                problems += where + "changed more than once.\n";
+                continue;
+            }
+            BarEdit edit;
+            edit.staff = staff;
+            edit.bar = bar;
+            edit.original = bar < project.settings.bars ? project.score[staff][bar] : Bar{};
+            wxString why;
+            if (!ParseBarText(probe, staff, bar, Utf8Field(change, "notes"), edit.replacement, &why)) {
+                problems += where + why + ".\n";
+                continue;
+            }
+            out.edits.push_back(std::move(edit));
+            minBar = std::min(minBar, bar);
+            maxBar = std::max(maxBar, bar);
+            touchedStaves.insert(staff);
+        }
+    }
+
+    // Structural changes must never silently delete music.
+    for (int staff = 0; staff < int(project.staves.size()); ++staff) {
+        for (int bar = 0; bar < project.settings.bars; ++bar) {
+            if (seen.count({staff, bar})) continue;
+            const bool removed = bar >= probe.settings.bars;
+            if (!removed && std::abs(project.BarBeats(bar) - probe.BarBeats(bar)) < 1e-6) continue;
+            const double limit = removed ? 0 : probe.BarBeats(bar);
+            double pos = 0;
+            for (const Event& ev : project.score[staff][bar]) {
+                if (!ev.rest && pos + ev.beats > limit + 1e-6) {
+                    problems += wxString::Format("Bar %d, ", bar + 1) + StaffLabel(project, staff) +
+                                (removed ? ": has music but would be removed.\n"
+                                         : ": has notes past the new barline, so rewrite this bar in changes.\n");
+                    break;
+                }
+                pos += ev.beats;
+            }
+        }
+    }
 
     for (const json& entry : dynamics) {
-        const wxString staffName = Utf8Field(entry, "staff");
-        const int staff = FindStaffByName(project, staffName);
+        const std::vector<int> staves = stavesOf(entry);
         const int bar = intField(entry, "bar") - 1;
         const double beat = numberField(entry, "beat", 1) - 1;
         const wxString mark = Utf8Field(entry, "mark");
-        if (staff < 0 || bar < 0 || bar >= project.settings.bars || beat < 0 || beat >= project.BarBeats(bar)) {
-            problems += "Dynamic on \"" + staffName + wxString::Format("\" at bar %d is out of range.\n", bar + 1);
+        if (bar < 0 || bar >= probe.settings.bars || beat < 0 || beat >= probe.BarBeats(bar)) {
+            problems += wxString::Format("Dynamic at bar %d is out of range.\n", bar + 1);
             continue;
         }
         if (mark != "none" && mark != "pp" && mark != "p" && mark != "mp" && mark != "mf" && mark != "f" && mark != "ff") {
             problems += "\"" + mark + "\" is not a dynamic.\n";
             continue;
         }
-        Marking m{bar, staff, beat, mark};
-        (mark == "none" ? out.removedDynamics : out.dynamics).push_back(std::move(m));
+        for (int staff : staves) {
+            Marking m{bar, staff, beat, mark};
+            (mark == "none" ? out.removedDynamics : out.dynamics).push_back(std::move(m));
+        }
     }
 
     for (const json& entry : hairpins) {
-        const wxString staffName = Utf8Field(entry, "staff");
+        const std::vector<int> staves = stavesOf(entry);
         Hairpin h;
-        h.staff = FindStaffByName(project, staffName);
         h.bar = intField(entry, "start_bar") - 1;
         h.beat = numberField(entry, "start_beat", 1) - 1;
         h.endBar = intField(entry, "end_bar") - 1;
         h.endBeat = numberField(entry, "end_beat", 1) - 1;
         const wxString type = Utf8Field(entry, "type");
-        const int bars = project.settings.bars;
-        const bool inRange = h.staff >= 0 && h.bar >= 0 && h.bar < bars && h.beat >= 0 && h.beat < project.BarBeats(h.bar);
-        if (!inRange) {
-            problems += "Hairpin on \"" + staffName + wxString::Format("\" at bar %d is out of range.\n", h.bar + 1);
+        const int bars = probe.settings.bars;
+        if (h.bar < 0 || h.bar >= bars || h.beat < 0 || h.beat >= probe.BarBeats(h.bar)) {
+            problems += wxString::Format("Hairpin at bar %d is out of range.\n", h.bar + 1);
             continue;
         }
-        if (type == "none") {
-            out.removedHairpins.push_back(h);
-            continue;
-        }
-        if (type != "crescendo" && type != "diminuendo") {
+        if (type != "none" && type != "crescendo" && type != "diminuendo") {
             problems += "\"" + type + "\" is not a hairpin type.\n";
             continue;
         }
-        if (h.endBar < 0 || h.endBar >= bars || h.endBeat < 0 || h.endBeat > project.BarBeats(h.endBar) + 1e-6 ||
-            project.BarStart(h.endBar) + h.endBeat <= project.BarStart(h.bar) + h.beat) {
-            problems += "Hairpin on \"" + staffName + wxString::Format("\" at bar %d must end after it starts, within the score.\n", h.bar + 1);
+        if (type != "none" && (h.endBar < 0 || h.endBar >= bars || h.endBeat < 0 || h.endBeat > probe.BarBeats(h.endBar) + 1e-6 ||
+                               probe.BarStart(h.endBar) + h.endBeat <= probe.BarStart(h.bar) + h.beat)) {
+            problems += wxString::Format("Hairpin at bar %d must end after it starts, within the score.\n", h.bar + 1);
             continue;
         }
         h.crescendo = type == "crescendo";
-        out.hairpins.push_back(h);
+        for (int staff : staves) {
+            h.staff = staff;
+            (type == "none" ? out.removedHairpins : out.hairpins).push_back(h);
+        }
     }
 
     if (!problems.empty()) {
-        error = "The proposal was not shown. Fix these and call propose_edit again with all changes:\n" + problems;
+        error = "The proposal was not shown. Fix these and call propose_edit again with everything:\n" + problems;
         return false;
     }
+
+    if (!out.edits.empty())
+        note(wxString::Format("Notes: %zu staves, bars %d-%d", touchedStaves.size(), minBar + 1, maxBar + 1));
+    if (!out.dynamics.empty() || !out.removedDynamics.empty() || !out.hairpins.empty() || !out.removedHairpins.empty())
+        note("Dynamics and hairpins");
+    out.details = details;
+    out.meterKey = MeterKey(project);
     return true;
 }

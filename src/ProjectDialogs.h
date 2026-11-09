@@ -54,6 +54,19 @@ private:
     wxChoice* bottom_;
 };
 
+class TempoDialog : public wxDialog {
+public:
+    TempoDialog(wxWindow* parent, int bar, int bpm, const wxString& text, bool hasChange);
+    int Bpm() const { return bpm_->GetValue(); }
+    wxString Text() const { return text_->GetValue(); }
+    bool RemoveRequested() const { return remove_; }
+
+private:
+    wxSpinCtrl* bpm_;
+    wxTextCtrl* text_;
+    bool remove_ = false;
+};
+
 // Two lists: every available instrument, and the score's parts in orchestral order.
 class InstrumentPicker : public wxPanel {
 public:

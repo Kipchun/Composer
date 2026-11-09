@@ -184,6 +184,166 @@ int Project::BarAtBeat(double beat) const {
     return std::clamp(from + int((beat - position) / beats + 1e-9), 0, settings.bars - 1);
 }
 
+int Project::TempoAt(int bar) const {
+    int bpm = settings.tempo;
+    for (const TempoChange& change : tempos) {
+        if (change.bar > bar) break;
+        bpm = change.bpm;
+    }
+    return bpm;
+}
+
+void Project::NormalizeMeters() {
+    std::sort(meters.begin(), meters.end(), [](const MeterChange& a, const MeterChange& b) { return a.bar < b.bar; });
+    for (size_t i = 0; i < meters.size();) {
+        int top, bottom;
+        MeterAt(meters[i].bar - 1, top, bottom);
+        if (meters[i].top == top && meters[i].bottom == bottom) meters.erase(meters.begin() + i);
+        else ++i;
+    }
+}
+
+void Project::FitMarksToBars() {
+    const int count = settings.bars;
+    markings.erase(std::remove_if(markings.begin(), markings.end(),
+                                  [&](const Marking& m) { return m.bar >= count || m.beat >= BarBeats(m.bar) - 1e-6; }),
+                   markings.end());
+    hairpins.erase(std::remove_if(hairpins.begin(), hairpins.end(),
+                                  [&](const Hairpin& h) { return h.bar >= count || h.beat >= BarBeats(h.bar) - 1e-6; }),
+                   hairpins.end());
+    for (Hairpin& h : hairpins) {
+        if (h.endBar >= count) {
+            h.endBar = count - 1;
+            h.endBeat = BarBeats(h.endBar);
+        }
+        h.endBeat = std::min(h.endBeat, BarBeats(h.endBar));
+    }
+    slurs.erase(std::remove_if(slurs.begin(), slurs.end(), [&](const Slur& s) { return s.bar >= count; }), slurs.end());
+    sections.erase(std::remove_if(sections.begin(), sections.end(), [&](const Section& s) { return s.bar >= count; }),
+                   sections.end());
+    tempos.erase(std::remove_if(tempos.begin(), tempos.end(), [&](const TempoChange& t) { return t.bar >= count; }),
+                 tempos.end());
+    meters.erase(std::remove_if(meters.begin(), meters.end(), [&](const MeterChange& m) { return m.bar >= count; }),
+                 meters.end());
+}
+
+namespace {
+
+// Keeps notes that still fit a bar of the new length and rebuilds the rests around them.
+Bar ResizeBar(const Bar& bar, double newBeats) {
+    std::vector<std::pair<double, Event>> notes;
+    double pos = 0;
+    for (const Event& ev : bar) {
+        if (!ev.rest && pos + ev.beats <= newBeats + 1e-6) notes.emplace_back(pos, ev);
+        pos += ev.beats;
+    }
+    if (notes.empty()) return FullBarRest(newBeats);
+
+    Bar out;
+    double cursor = 0;
+    const auto restsUpTo = [&](double to) {
+        while (cursor < to - 1e-6) {
+            bool placed = false;
+            for (double value : {4.0, 2.0, 1.0, 0.5, 0.25}) {
+                if (value <= to - cursor + 1e-6 && std::fmod(cursor, value) < 1e-6) {
+                    Event rest;
+                    rest.rest = true;
+                    rest.beats = value;
+                    out.push_back(rest);
+                    cursor += value;
+                    placed = true;
+                    break;
+                }
+            }
+            if (!placed) break;
+        }
+    };
+    for (auto& entry : notes) {
+        restsUpTo(entry.first);
+        cursor = entry.first + entry.second.beats;
+        out.push_back(std::move(entry.second));
+    }
+    restsUpTo(newBeats);
+    return out;
+}
+
+}  // namespace
+
+wxString MeterKey(const Project& project) {
+    wxString key = wxString::Format("%d:%d/%d", project.settings.bars, project.settings.timeTop, project.settings.timeBottom);
+    for (const MeterChange& m : project.meters) key += wxString::Format(";%d:%d/%d", m.bar, m.top, m.bottom);
+    return key;
+}
+
+Project ProjectWithProposal(const Project& base, const Proposal& p, bool flagProposed) {
+    Project r = base;
+    ProjectSettings& s = r.settings;
+    if (p.title_) s.title = *p.title_;
+    if (p.subtitle) s.subtitle = *p.subtitle;
+    if (p.composer) s.composer = *p.composer;
+    if (p.tempoText) s.tempoText = *p.tempoText;
+    if (p.fifths) s.fifths = *p.fifths;
+    if (p.minor) s.minor = *p.minor;
+    if (p.barsPerLine) s.barsPerLine = *p.barsPerLine;
+    if (p.bars) s.bars = *p.bars;
+
+    for (int bar : p.removedMeters)
+        r.meters.erase(std::remove_if(r.meters.begin(), r.meters.end(), [&](const MeterChange& m) { return m.bar == bar; }),
+                       r.meters.end());
+    for (const MeterChange& m : p.setMeters) {
+        if (m.bar == 0) {
+            s.timeTop = m.top;
+            s.timeBottom = m.bottom;
+            continue;
+        }
+        r.meters.erase(std::remove_if(r.meters.begin(), r.meters.end(), [&](const MeterChange& x) { return x.bar == m.bar; }),
+                       r.meters.end());
+        r.meters.push_back(m);
+    }
+    r.NormalizeMeters();
+
+    for (int bar : p.removedTempos)
+        r.tempos.erase(std::remove_if(r.tempos.begin(), r.tempos.end(), [&](const TempoChange& t) { return t.bar == bar; }),
+                       r.tempos.end());
+    for (TempoChange t : p.setTempos) {
+        if (t.bar == 0) {
+            s.tempo = t.bpm;
+            if (!t.text.empty()) s.tempoText = t.text;
+            continue;
+        }
+        r.tempos.erase(std::remove_if(r.tempos.begin(), r.tempos.end(), [&](const TempoChange& x) { return x.bar == t.bar; }),
+                       r.tempos.end());
+        t.proposed = flagProposed;
+        r.tempos.push_back(std::move(t));
+    }
+    std::sort(r.tempos.begin(), r.tempos.end(), [](const TempoChange& a, const TempoChange& b) { return a.bar < b.bar; });
+
+    for (int bar : p.removedSections)
+        r.sections.erase(std::remove_if(r.sections.begin(), r.sections.end(), [&](const Section& x) { return x.bar == bar; }),
+                         r.sections.end());
+    for (const Section& section : p.setSections) {
+        r.sections.erase(std::remove_if(r.sections.begin(), r.sections.end(), [&](const Section& x) { return x.bar == section.bar; }),
+                         r.sections.end());
+        r.sections.push_back(section);
+    }
+    std::sort(r.sections.begin(), r.sections.end(), [](const Section& a, const Section& b) { return a.bar < b.bar; });
+
+    const int oldBars = base.settings.bars;
+    for (auto& staff : r.score) {
+        staff.resize(s.bars);
+        for (int bar = 0; bar < s.bars; ++bar) {
+            const double beats = r.BarBeats(bar);
+            if (bar >= oldBars) staff[bar] = FullBarRest(beats);
+            else if (std::abs(base.BarBeats(bar) - beats) > 1e-6) staff[bar] = ResizeBar(staff[bar], beats);
+        }
+    }
+
+    for (const BarEdit& edit : p.edits) r.score[edit.staff][edit.bar] = edit.replacement;
+    ApplyMarkEdits(p, r.markings, r.hairpins, flagProposed);
+    r.FitMarksToBars();
+    return r;
+}
+
 void ApplyMarkEdits(const Proposal& proposal, std::vector<Marking>& markings, std::vector<Hairpin>& hairpins,
                     bool flagProposed) {
     const auto sameDynamicSpot = [](const Marking& a, const Marking& b) {
@@ -259,6 +419,7 @@ Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
     Project result = BuildProject(old.settings, indices);
     result.sections = old.sections;
     result.meters = old.meters;
+    result.tempos = old.tempos;
     for (auto& staff : result.score)
         for (int bar = 0; bar < int(staff.size()); ++bar) staff[bar] = FullBarRest(result.BarBeats(bar));
 
@@ -360,6 +521,13 @@ Proposal MakeDemoProposal(const Project& project) {
         proposal.edits.push_back(std::move(edit));
     }
     return proposal;
+}
+
+wxString PlainKeyLabel(int fifths, bool minor) {
+    wxString label = KeyLabel(fifths, minor);
+    label.Replace(wxString(wxUniChar(0x266D)), "b");
+    label.Replace(wxString(wxUniChar(0x266F)), "#");
+    return label;
 }
 
 wxString KeyLabel(int fifths, bool minor) {
@@ -580,6 +748,8 @@ bool SaveProjectFile(const wxString& path, const Project& project, wxString* err
         line("hairpin", wxString::Format("%d\t%d\t", h.staff, h.bar) + wxString::FromCDouble(h.beat) +
                             wxString::Format("\t%d\t", h.endBar) + wxString::FromCDouble(h.endBeat) +
                             wxString::Format("\t%d", h.crescendo ? 1 : 0));
+    for (const TempoChange& t : project.tempos)
+        line("tempochange", wxString::Format("%d\t%d\t", t.bar, t.bpm) + Escape(t.text));
     for (const MeterChange& m : project.meters)
         line("meter", wxString::Format("%d\t%d\t%d", m.bar, m.top, m.bottom));
     for (size_t staff = 0; staff < project.score.size(); ++staff)
@@ -681,6 +851,11 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
                  f[5].ToCDouble(&h.endBeat) && ToInt(f[6], crescendo);
             h.crescendo = crescendo != 0;
             p.hairpins.push_back(h);
+        } else if (key == "tempochange" && need(3)) {
+            TempoChange t;
+            ok = ToInt(f[1], t.bar) && ToInt(f[2], t.bpm) && t.bpm >= 10 && t.bpm <= 400;
+            t.text = Unescape(f[3]);
+            p.tempos.push_back(std::move(t));
         } else if (key == "meter" && need(3)) {
             MeterChange m{};
             ok = ToInt(f[1], m.bar) && ToInt(f[2], m.top) && ToInt(f[3], m.bottom) && m.top >= 1 && m.top <= 16 &&
@@ -715,6 +890,10 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
               [](const MeterChange& a, const MeterChange& b) { return a.bar < b.bar; });
     for (const MeterChange& m : p.meters)
         if (m.bar < 1 || m.bar >= s.bars) return Fail(error, "The project file is damaged (time signatures).");
+
+    std::sort(p.tempos.begin(), p.tempos.end(), [](const TempoChange& a, const TempoChange& b) { return a.bar < b.bar; });
+    for (const TempoChange& t : p.tempos)
+        if (t.bar < 1 || t.bar >= s.bars) return Fail(error, "The project file is damaged (tempo changes).");
 
     p.score.assign(p.staves.size(), std::vector<Bar>(s.bars));
     for (auto& staff : p.score)

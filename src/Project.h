@@ -3,6 +3,7 @@
 
 #include <wx/string.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,13 @@ struct MeterChange {
     int bar, top, bottom;
 };
 
+// A tempo taking effect at a bar after the first.
+struct TempoChange {
+    int bar = 0, bpm = 96;
+    wxString text;
+    bool proposed = false;
+};
+
 // A rectangle of bars and staves. Staves of -1 mean every staff.
 struct BarRange {
     int firstBar = -1, lastBar = -1, firstStaff = -1, lastStaff = -1;
@@ -108,6 +116,7 @@ struct Project {
     std::vector<Slur> slurs;
     std::vector<Hairpin> hairpins;
     std::vector<MeterChange> meters;  // sorted by bar
+    std::vector<TempoChange> tempos;  // sorted by bar
     std::vector<PluginSetup> plugins;
     bool demo = false;  // the built-in sample, which has a scripted Director proposal
 
@@ -119,6 +128,9 @@ struct Project {
     double BarStart(int bar) const;
     double TotalBeats() const { return BarStart(settings.bars); }
     int BarAtBeat(double beat) const;
+    int TempoAt(int bar) const;
+    void NormalizeMeters();  // drops changes that repeat the meter before them
+    void FitMarksToBars();   // after bars shrink or disappear
 };
 
 // One selectable instrument, listed in orchestral score order.
@@ -141,7 +153,27 @@ struct Proposal {
     std::vector<BarEdit> edits;
     std::vector<Marking> dynamics, removedDynamics;
     std::vector<Hairpin> hairpins, removedHairpins;
+
+    // Whole-project changes; a bar of 0 means the opening of the piece.
+    std::optional<wxString> title_, subtitle, composer, tempoText;  // title_ renames the piece
+    std::optional<int> fifths;
+    std::optional<bool> minor;
+    std::optional<int> bars, barsPerLine;
+    std::vector<MeterChange> setMeters;
+    std::vector<int> removedMeters;
+    std::vector<TempoChange> setTempos;
+    std::vector<int> removedTempos;
+    std::vector<Section> setSections;
+    std::vector<int> removedSections;
+
+    wxString details;    // plain-language list of everything this does, for the card
+    wxString meterKey;   // the bar layout it was written against; empty to skip the check
 };
+
+// The project as it would be with the proposal applied.
+Project ProjectWithProposal(const Project& base, const Proposal& proposal, bool flagProposed);
+wxString MeterKey(const Project& project);
+wxString PlainKeyLabel(int fifths, bool minor);
 
 // Adds and removes a proposal's markings in the given lists.
 void ApplyMarkEdits(const Proposal& proposal, std::vector<Marking>& markings, std::vector<Hairpin>& hairpins,
