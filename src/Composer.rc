@@ -1,0 +1,6 @@
+// Pulls in the wxWidgets resources and the common-controls manifest
+// that native theming and dark mode rely on.
+#define wxUSE_RC_MANIFEST 1
+#define wxUSE_DPI_AWARE_MANIFEST 0
+#define WX_CPU_AMD64
+#include "wx/msw/wx.rc"
