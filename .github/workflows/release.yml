@@ -1,0 +1,92 @@
+name: Release
+
+# Push a tag like v0.1.0 to build Composer and publish a GitHub release with the zipped exe.
+# Running it by hand (Actions tab -> Release -> Run workflow) builds and uploads the zip as a
+# workflow artifact without creating a release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  WX_VERSION: 3.3.1
+  VST3_SDK_TAG: v3.8.1_build_84
+  JSON_VERSION: v3.12.0
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # wxWidgets is built once as static release libs (lib/vc_x64_lib, the same layout
+      # CMakeLists.txt expects from a local WXWIN) and cached across runs.
+      - name: Restore wxWidgets cache
+        id: wx-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\wxWidgets
+          key: wx-${{ env.WX_VERSION }}-vc_x64_lib-release-${{ runner.os }}-v1
+
+      - name: Build wxWidgets
+        if: steps.wx-cache.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          curl -fsSL -o wx.zip https://github.com/wxWidgets/wxWidgets/releases/download/v%WX_VERSION%/wxWidgets-%WX_VERSION%.zip || exit /b 1
+          7z x wx.zip -oC:\wxWidgets >nul || exit /b 1
+          cd /d C:\wxWidgets\build\msw
+          nmake /nologo /f makefile.vc BUILD=release TARGET_CPU=X64 SHARED=0 RUNTIME_LIBS=dynamic || exit /b 1
+
+      - name: Fetch third-party sources
+        shell: cmd
+        run: |
+          git clone --depth 1 --branch %VST3_SDK_TAG% --recurse-submodules --shallow-submodules https://github.com/steinbergmedia/vst3sdk.git third_party\vst3sdk || exit /b 1
+          mkdir third_party\nlohmann
+          curl -fsSL -o third_party\nlohmann\json.hpp https://github.com/nlohmann/json/releases/download/%JSON_VERSION%/json.hpp || exit /b 1
+
+      - name: Configure
+        shell: cmd
+        env:
+          WXWIN: C:\wxWidgets
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: cmd
+        run: cmake --build build
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          $zip = "Composer-$name-win64.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build\Composer.exe dist\
+          if (Test-Path README.md) { Copy-Item README.md dist\ }
+          Compress-Archive -Path dist\* -DestinationPath $zip
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zip }}
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" "${{ steps.package.outputs.zip }}" `
+            --title "Composer $env:GITHUB_REF_NAME" --generate-notes
