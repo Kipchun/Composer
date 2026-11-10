@@ -56,7 +56,7 @@ void AudioEngine::ThreadMain(std::promise<void> ready) {
     // No usable device: keep time so that playback and the playhead still work.
     const DWORD sleepMs = DWORD(1000.0 * kBlock / sampleRate_);
     while (running_) {
-        RenderBlock();
+        if (!offline_) RenderBlock();
         Sleep(sleepMs);
     }
 
@@ -100,9 +100,12 @@ bool AudioEngine::OpenAndRun(std::promise<void>& ready, bool& signalled) {
 
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     UINT32 bufferFrames = 0;
+    ComPtr<IAudioClock> clock;
+    UINT64 clockFrequency = 0;
     if (!event || FAILED(client->SetEventHandle(event)) ||
         FAILED(client->GetBufferSize(&bufferFrames)) ||
-        FAILED(client->GetService(IID_PPV_ARGS(&render))) || FAILED(client->Start())) {
+        FAILED(client->GetService(IID_PPV_ARGS(&render))) || FAILED(client->GetService(IID_PPV_ARGS(&clock))) ||
+        FAILED(clock->GetFrequency(&clockFrequency)) || FAILED(client->Start())) {
         if (event) CloseHandle(event);
         return false;
     }
@@ -111,6 +114,7 @@ bool AudioEngine::OpenAndRun(std::promise<void>& ready, bool& signalled) {
     ready.set_value();
     signalled = true;
 
+    int64_t written = 0;  // frames handed to the device since it started
     while (running_) {
         WaitForSingleObject(event, 200);
         UINT32 padding = 0;
@@ -122,7 +126,13 @@ bool AudioEngine::OpenAndRun(std::promise<void>& ready, bool& signalled) {
 
         auto* out = reinterpret_cast<float*>(data);
         for (UINT32 i = 0; i < available; ++i) {
+            if (offline_) {  // Bounce owns the mix buffers
+                *out++ = 0;
+                *out++ = 0;
+                continue;
+            }
             if (blockRead_ >= size_t(kBlock)) {
+                blockStreamFrame_ = written + i;
                 RenderBlock();
                 blockRead_ = 0;
             }
@@ -131,6 +141,18 @@ bool AudioEngine::OpenAndRun(std::promise<void>& ready, bool& signalled) {
             ++blockRead_;
         }
         if (FAILED(render->ReleaseBuffer(available, 0))) break;
+        written += available;
+
+        // Converts the take's stream position to wall-clock time using where the device is now.
+        if (takeFromStream_) {
+            UINT64 played = 0, qpc = 0;
+            if (SUCCEEDED(clock->GetPosition(&played, &qpc)) && clockFrequency > 0) {
+                const double ahead = double(takeStreamFrame_) / sampleRate_ - double(played) / double(clockFrequency);
+                takeHns_ = int64_t(qpc) + int64_t(ahead * 1e7);
+                hasTakeTime_ = true;
+                takeFromStream_ = false;
+            }
+        }
     }
 
     client->Stop();
@@ -186,6 +208,37 @@ void AudioEngine::RenderBlock() {
     std::fill(mixL_.begin(), mixL_.end(), 0.f);
     std::fill(mixR_.begin(), mixR_.end(), 0.f);
 
+    if (preroll_ > 0) {
+        Mix();
+        AddClick(prerollTotal_ - preroll_, countInClicks_);
+        preroll_ -= kBlock;
+        if (preroll_ <= 0) {
+            preroll_ = 0;
+            playing_ = true;
+            MoveCursor();
+            markTake_ = true;
+        }
+        for (int i = 0; i < kBlock; ++i) {
+            mixL_[i] = std::clamp(mixL_[i], -1.f, 1.f);
+            mixR_[i] = std::clamp(mixR_[i], -1.f, 1.f);
+        }
+        return;
+    }
+
+    if (playing_ && markTake_) {
+        markTake_ = false;
+        if (hasDevice_ && !offline_) {
+            takeStreamFrame_ = blockStreamFrame_;
+            takeFromStream_ = true;
+        } else {
+            LARGE_INTEGER frequency, now;
+            QueryPerformanceFrequency(&frequency);
+            QueryPerformanceCounter(&now);
+            takeHns_ = int64_t(double(now.QuadPart) * 1e7 / double(frequency.QuadPart));
+            hasTakeTime_ = true;
+        }
+    }
+
     if (playing_) {
         const int64_t end = start + kBlock;
         while (cursor_ < schedule_.size() && schedule_[cursor_].sample < end) {
@@ -193,7 +246,11 @@ void AudioEngine::RenderBlock() {
             Emit(s.track, int(std::max<int64_t>(0, s.sample - start)), s.pitch, s.on, s.velocity);
         }
         position_ = end;
-        if (end >= totalSamples_) {
+        if (end >= stopSample_) {
+            playing_ = false;
+            allOff_ = true;
+            stopSample_ = INT64_MAX;
+        } else if (end >= totalSamples_) {
             position_ = 0;
             cursor_ = 0;
             allOff_ = true;
@@ -207,7 +264,7 @@ void AudioEngine::RenderBlock() {
                          [](const MidiEvent& a, const MidiEvent& b) { return a.offset < b.offset; });
 
     Mix();
-    if (click_ && playing_) AddClick(start);
+    if (click_ && playing_) AddClick(start, clicks_);
     for (int i = 0; i < kBlock; ++i) {
         mixL_[i] = std::clamp(mixL_[i], -1.f, 1.f);
         mixR_[i] = std::clamp(mixR_[i], -1.f, 1.f);
@@ -226,12 +283,19 @@ void AudioEngine::Mix() {
             peak = std::max({peak, std::abs(trackL_[i]), std::abs(trackR_[i])});
         }
         if (peak > peaks_[t]) peaks_[t] = peak;
+        if (captureStems_) {
+            auto& stem = (*captureStems_)[t];
+            for (int i = 0; i < kBlock; ++i) {
+                stem.push_back(trackL_[i]);
+                stem.push_back(trackR_[i]);
+            }
+        }
     }
 }
 
-void AudioEngine::AddClick(int64_t start) {
-    const auto next = std::lower_bound(clicks_.begin(), clicks_.end(), start);
-    const int startFrame = next != clicks_.end() && *next < start + kBlock ? int(*next - start) : kBlock;
+void AudioEngine::AddClick(int64_t start, const std::vector<int64_t>& clicks) {
+    const auto next = std::lower_bound(clicks.begin(), clicks.end(), start);
+    const int startFrame = next != clicks.end() && *next < start + kBlock ? int(*next - start) : kBlock;
 
     for (int i = 0; i < kBlock; ++i) {
         if (i == startFrame) {
@@ -267,18 +331,18 @@ void AudioEngine::MoveCursor() {
 
 double AudioEngine::BeatToSample(double beat) const {
     if (tempoMap_.empty()) return 0;
-    const TempoSegment* segment = &tempoMap_[0];
-    for (const TempoSegment& candidate : tempoMap_)
-        if (candidate.beat <= beat) segment = &candidate;
-    return segment->sample + (beat - segment->beat) * segment->samplesPerBeat;
+    auto next = std::upper_bound(tempoMap_.begin(), tempoMap_.end(), beat,
+                                 [](double value, const TempoSegment& s) { return value < s.beat; });
+    const TempoSegment& segment = next == tempoMap_.begin() ? *next : *(next - 1);
+    return segment.sample + (beat - segment.beat) * segment.samplesPerBeat;
 }
 
 double AudioEngine::SampleToBeat(double sample) const {
     if (tempoMap_.empty()) return 0;
-    const TempoSegment* segment = &tempoMap_[0];
-    for (const TempoSegment& candidate : tempoMap_)
-        if (candidate.sample <= sample) segment = &candidate;
-    return segment->beat + (sample - segment->sample) / segment->samplesPerBeat;
+    auto next = std::upper_bound(tempoMap_.begin(), tempoMap_.end(), sample,
+                                 [](double value, const TempoSegment& s) { return value < s.sample; });
+    const TempoSegment& segment = next == tempoMap_.begin() ? *next : *(next - 1);
+    return segment.beat + (sample - segment.sample) / segment.samplesPerBeat;
 }
 
 void AudioEngine::SetSchedule(const std::vector<PlayNote>& notes, double totalBeats,
@@ -323,20 +387,167 @@ void AudioEngine::SetSchedule(const std::vector<PlayNote>& notes, double totalBe
     if (playing_) allOff_ = true;  // a sounding note's release may no longer exist
 }
 
+bool AudioEngine::BounceIsRealTime() const {
+    for (const auto& instrument : instruments_)
+        if (instrument && instrument->NeedsRealTime()) return true;
+    return false;
+}
+
+bool AudioEngine::Bounce(std::vector<float>& mix, std::vector<std::vector<float>>& stems,
+                         const std::function<bool(double)>& progress) {
+    constexpr double kTailSeconds = 4;
+    const bool paced = BounceIsRealTime();
+    offline_ = true;
+    Sleep(80);  // lets the audio thread finish any block it had started
+
+    bool savedLoop, savedClick;
+    int64_t savedPosition;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        savedLoop = loop_;
+        savedClick = click_;
+        savedPosition = position_;
+        loop_ = false;
+        click_ = false;
+        playing_ = false;
+        position_ = 0;
+        cursor_ = 0;
+        allOff_ = true;
+        previews_.clear();
+        newPreviews_.clear();
+    }
+
+    LARGE_INTEGER frequency, clock;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&clock);
+    const double ticksPerBlock = double(frequency.QuadPart) * kBlock / sampleRate_;
+    double nextBlock = double(clock.QuadPart);
+    const auto waitForBlock = [&] {
+        if (!paced) return;
+        nextBlock += ticksPerBlock;
+        for (;;) {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            const double remaining = nextBlock - double(now.QuadPart);
+            if (remaining <= 0) break;
+            const DWORD ms = DWORD(remaining * 1000.0 / double(frequency.QuadPart));
+            Sleep(ms > 1 ? ms - 1 : 0);
+        }
+    };
+
+    // Lets anything still ringing die away before the first note.
+    for (int i = 0; i < int(sampleRate_) / kBlock; ++i) {
+        RenderBlock();
+        waitForBlock();
+    }
+
+    const int64_t tail = int64_t(kTailSeconds * sampleRate_);
+    const int64_t total = totalSamples_ + tail;
+    stems.assign(tracks_, {});
+    for (auto& stem : stems) stem.reserve(size_t(total) * 2);
+    mix.clear();
+    mix.reserve(size_t(total) * 2);
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        position_ = 0;
+        MoveCursor();
+        playing_ = true;
+        captureStems_ = &stems;
+    }
+
+    bool finished = true;
+    int sinceReport = 0;
+    for (int64_t frame = 0; frame < total; frame += kBlock) {
+        RenderBlock();
+        for (int i = 0; i < kBlock; ++i) {
+            mix.push_back(mixL_[i]);
+            mix.push_back(mixR_[i]);
+        }
+        if (++sinceReport >= 20) {
+            sinceReport = 0;
+            if (!progress(double(frame) / total)) {
+                finished = false;
+                break;
+            }
+        }
+        waitForBlock();
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        captureStems_ = nullptr;
+        loop_ = savedLoop;
+        click_ = savedClick;
+        playing_ = false;
+        position_ = savedPosition;
+        allOff_ = true;
+        MoveCursor();
+    }
+    blockRead_ = kBlock;
+    offline_ = false;
+
+    // Keep each file's natural ring but not a long silence after it.
+    const auto trim = [&](std::vector<float>& audio) {
+        size_t last = audio.size();
+        while (last > 0 && std::abs(audio[last - 1]) < 0.0002f) --last;
+        const size_t keep = std::max(last, size_t(totalSamples_) * 2) + size_t(sampleRate_ * 0.25) * 2;
+        audio.resize(std::min(audio.size(), keep) & ~size_t(1));
+    };
+    trim(mix);
+    for (auto& stem : stems) trim(stem);
+    return finished;
+}
+
 void AudioEngine::Play() {
     std::lock_guard<std::mutex> guard(lock_);
     MoveCursor();
+    stopSample_ = INT64_MAX;
     playing_ = true;
+}
+
+void AudioEngine::PlayTake(double startBeat, double stopBeat, int countInClicks, double secondsPerClick) {
+    std::lock_guard<std::mutex> guard(lock_);
+    playing_ = false;
+    allOff_ = true;
+    previews_.clear();
+    newPreviews_.clear();
+    position_ = int64_t(BeatToSample(startBeat));
+    stopSample_ = int64_t(BeatToSample(stopBeat));
+    hasTakeTime_ = false;
+    takeFromStream_ = false;
+
+    // The count-in ends exactly on the first beat; it starts early enough to fill whole blocks.
+    const int64_t spacing = int64_t(std::llround(secondsPerClick * sampleRate_));
+    const int64_t needed = int64_t(std::max(0, countInClicks)) * spacing;
+    prerollTotal_ = (needed + kBlock - 1) / kBlock * kBlock;
+    countInClicks_.clear();
+    for (int i = countInClicks; i >= 1; --i) countInClicks_.push_back(prerollTotal_ - i * spacing);
+    if (prerollTotal_ > 0) {
+        preroll_ = prerollTotal_;
+    } else {
+        preroll_ = 0;
+        MoveCursor();
+        playing_ = true;
+        markTake_ = true;
+    }
+}
+
+bool AudioEngine::TakeStartTime(int64_t& hns) const {
+    if (!hasTakeTime_) return false;
+    hns = takeHns_;
+    return true;
 }
 
 void AudioEngine::Pause() {
     std::lock_guard<std::mutex> guard(lock_);
     playing_ = false;
+    preroll_ = 0;
     allOff_ = true;
 }
 
 void AudioEngine::Stop() {
     std::lock_guard<std::mutex> guard(lock_);
+    preroll_ = 0;
     playing_ = false;
     position_ = 0;
     cursor_ = 0;

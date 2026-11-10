@@ -34,6 +34,12 @@ public:
     bool WouldMeterLoseNotes(int bar, int top, int bottom) const;
     // A tempo from `bar` until the next change; remove clears one. Undoable.
     void SetTempoChange(int bar, int bpm, const wxString& text, bool remove);
+    // A gradual change across bars; empty text with remove clears any overlapping one.
+    void SetTempoRamp(int firstBar, int lastBar, int endBpm, const wxString& text, bool remove);
+
+    // Off-screen drawing for export.
+    int PageCount() const { return pageCount_; }
+    wxImage RenderPage(int page, int pixelWidth);
 
     int BarCount() const { return project_.settings.bars; }
     int StaffCount() const { return int(project_.staves.size()); }
@@ -171,6 +177,7 @@ private:
         ProjectSettings settings;
         std::vector<MeterChange> meters;
         std::vector<TempoChange> tempos;
+        std::vector<TempoRamp> ramps;
         std::vector<Section> sections;
         std::vector<Marking> markings;
         std::vector<Hairpin> hairpins;
@@ -192,6 +199,7 @@ private:
     char pendingArticulation_ = 0;
     wxString pendingDynamic_;
 
+    bool printing_ = false;
     bool noteInput_ = false;
     double inputBeats_ = 1;
     bool inputRest_ = false;

@@ -18,7 +18,7 @@ Each message begins with the project's current state and the user's selection. I
 
 To change the piece, call propose_edit. The user hears and reviews your proposal before anything changes, so describe what you did in its summary and don't ask permission first. For questions and discussion, just answer. Change only what was asked, and leave other bars and staves alone unless the request calls for them.
 
-One proposal can change many staves and bars together, and should: put a whole orchestration, or a rewrite plus its tempo or meter change, in a single call so the user reviews it as one idea. Use staves in place of staff to write identical content on several staves. You can edit notes, articulations, dynamics, hairpins, time signatures, tempo and tempo changes, the key, rehearsal marks, the number of bars, bars per line, and the title, subtitle and composer. If asked to change the instrument list, say that you can't do that yet.
+One proposal can change many staves and bars together, and should: put a whole orchestration, or a rewrite plus its tempo or meter change, in a single call so the user reviews it as one idea. Use staves in place of staff to write identical content on several staves. You can edit notes, articulations, dynamics, hairpins, time signatures, tempo, sudden and gradual tempo changes, the key, rehearsal marks, the number of bars, bars per line, and the title, subtitle and composer. If asked to change the instrument list, say that you can't do that yet.
 
 Bar numbers in a proposal always refer to the piece as it will be after the proposal. If a time signature change makes a bar shorter and that bar has music, rewrite that bar in the same proposal. Changing the key keeps notes on the same staff lines, so their pitches change; to keep or transpose the music, rewrite the bars in the same proposal.
 
@@ -33,6 +33,8 @@ Notation used by read_score and propose_edit:
 - Bars can differ in time signature. Each bar is labelled with its own in read_score.
 - Write the pitch you want heard. A note with no accidental is the natural note, so in E-flat major you must write Bb4, Eb5 and Ab4. Composer works out the printed accidentals.
 - Each bar must add up exactly to the length of the bar. There are no ties or tuplets yet, so notes can't cross a barline.
+
+The user can sing a melody into Composer. When the context includes a sung melody, it is their own idea, already cleaned up: develop it as asked (harmonise, orchestrate, extend, vary) while keeping it recognisable, and write the melody itself into your proposal on its staff unless told otherwise.
 
 Replies appear in a small plain-text chat panel, so write short plain paragraphs without Markdown.)";
 
@@ -133,6 +135,21 @@ json Tools() {
                   "remove": {"type": "boolean"}
                 },
                 "required": ["bar"]
+              }
+            },
+            "tempo_ramps": {
+              "type": "array",
+              "description": "Gradual tempo changes (ritardando, accelerando) across whole bars, from the tempo already in effect to end_bpm. To remove one, give its start_bar and remove true. They can't overlap each other.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "start_bar": {"type": "integer"},
+                  "end_bar": {"type": "integer", "description": "Last bar of the change, inclusive."},
+                  "end_bpm": {"type": "integer", "description": "20 to 300."},
+                  "text": {"type": "string", "description": "The printed marking, such as rit., rall. or accel."},
+                  "remove": {"type": "boolean"}
+                },
+                "required": ["start_bar"]
               }
             },
             "rehearsal_marks": {
@@ -404,9 +421,10 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
     };
     const json changes = listOf("changes"), dynamics = listOf("dynamics"), hairpins = listOf("hairpins");
     const json meters = listOf("time_signatures"), tempos = listOf("tempos"), marks = listOf("rehearsal_marks");
+    const json ramps = listOf("tempo_ramps");
     const json settings = input.contains("project") && input["project"].is_object() ? input["project"] : json::object();
     if (changes.empty() && dynamics.empty() && hairpins.empty() && meters.empty() && tempos.empty() && marks.empty() &&
-        settings.empty()) {
+        ramps.empty() && settings.empty()) {
         error = "The proposal doesn't change anything.";
         return false;
     }
@@ -520,6 +538,27 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
             }
         }
     }
+    for (const json& entry : ramps) {
+        const int bar = intField(entry, "start_bar") - 1;
+        if (bar < 0 || bar >= barTotal) {
+            problems += wxString::Format("Gradual tempo change at bar %d is out of range.\n", bar + 1);
+        } else if (isRemoval(entry)) {
+            out.removedRamps.push_back(bar);
+            note(wxString::Format("Remove gradual tempo change at bar %d", bar + 1));
+        } else {
+            TempoRamp ramp;
+            ramp.bar = bar;
+            ramp.endBar = intField(entry, "end_bar") - 1;
+            ramp.endBpm = intField(entry, "end_bpm");
+            ramp.text = Utf8Field(entry, "text");
+            if (ramp.endBar < bar || ramp.endBar >= barTotal || ramp.endBpm < 20 || ramp.endBpm > 300 || ramp.text.empty()) {
+                problems += wxString::Format("Gradual tempo change at bar %d needs end_bar within the score, end_bpm 20 to 300, and text.\n", bar + 1);
+            } else {
+                note(ramp.text + wxString::Format(" bars %d-%d to %d", ramp.bar + 1, ramp.endBar + 1, ramp.endBpm));
+                out.setRamps.push_back(std::move(ramp));
+            }
+        }
+    }
     for (const json& entry : marks) {
         const int bar = intField(entry, "bar") - 1;
         const wxString label = Utf8Field(entry, "label");
@@ -536,6 +575,15 @@ bool DirectorSession::BuildProposal(const json& input, Proposal& out, wxString& 
 
     // Notes and marks are checked against the piece as it will be.
     const Project probe = ProjectWithProposal(project, out, false);
+
+    for (size_t i = 0; i < probe.ramps.size(); ++i) {
+        const TempoRamp& ramp = probe.ramps[i];
+        if (i + 1 < probe.ramps.size() && probe.ramps[i + 1].bar <= ramp.endBar)
+            problems += wxString::Format("Gradual tempo changes at bars %d and %d overlap.\n", ramp.bar + 1, probe.ramps[i + 1].bar + 1);
+        for (const TempoChange& t : probe.tempos)
+            if (t.bar > ramp.bar && t.bar <= ramp.endBar)
+                problems += wxString::Format("The tempo change at bar %d falls inside the gradual change at bar %d.\n", t.bar + 1, ramp.bar + 1);
+    }
 
     std::set<std::pair<int, int>> seen;
     int minBar = probe.settings.bars, maxBar = -1;

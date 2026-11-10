@@ -659,7 +659,13 @@ wxString DirectorPanel::BuildContext() const {
     return context;
 }
 
-void DirectorPanel::Send(const wxString& text) {
+bool DirectorPanel::SendWithContext(const wxString& message, const wxString& extraContext) {
+    if (session_->IsBusy() || !score_) return false;
+    Send(message, extraContext);
+    return true;
+}
+
+void DirectorPanel::Send(const wxString& text, const wxString& extraContext) {
     const wxString message = wxString(text).Trim().Trim(false);
     if (message.empty() || session_->IsBusy() || !score_) return;
 
@@ -677,5 +683,7 @@ void DirectorPanel::Send(const wxString& text) {
     chat_->score = score_;
     chat_->Add(true, message);
     SetBusy(true);
-    session_->Send(message, BuildContext(), key, LoadDirectorModel());
+    wxString context = BuildContext();
+    if (!extraContext.empty()) context += "\n" + extraContext + "\n";
+    session_->Send(message, context, key, LoadDirectorModel());
 }

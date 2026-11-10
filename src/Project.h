@@ -69,6 +69,13 @@ struct TempoChange {
     bool proposed = false;
 };
 
+// A gradual tempo change across whole bars, ending at endBpm. Its text is the printed marking.
+struct TempoRamp {
+    int bar = 0, endBar = 0, endBpm = 96;
+    wxString text;
+    bool proposed = false;
+};
+
 // A rectangle of bars and staves. Staves of -1 mean every staff.
 struct BarRange {
     int firstBar = -1, lastBar = -1, firstStaff = -1, lastStaff = -1;
@@ -117,6 +124,7 @@ struct Project {
     std::vector<Hairpin> hairpins;
     std::vector<MeterChange> meters;  // sorted by bar
     std::vector<TempoChange> tempos;  // sorted by bar
+    std::vector<TempoRamp> ramps;     // sorted by bar, never overlapping
     std::vector<PluginSetup> plugins;
     bool demo = false;  // the built-in sample, which has a scripted Director proposal
 
@@ -129,6 +137,7 @@ struct Project {
     double TotalBeats() const { return BarStart(settings.bars); }
     int BarAtBeat(double beat) const;
     int TempoAt(int bar) const;
+    double TempoAtBeat(double beat) const;
     void NormalizeMeters();  // drops changes that repeat the meter before them
     void FitMarksToBars();   // after bars shrink or disappear
 };
@@ -163,6 +172,8 @@ struct Proposal {
     std::vector<int> removedMeters;
     std::vector<TempoChange> setTempos;
     std::vector<int> removedTempos;
+    std::vector<TempoRamp> setRamps;
+    std::vector<int> removedRamps;  // by starting bar
     std::vector<Section> setSections;
     std::vector<int> removedSections;
 
@@ -202,6 +213,7 @@ bool PartsFromProject(const Project& project, std::vector<ScorePart>& out);
 Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
                          const std::vector<PluginSetup>& plugins);
 Project MakeDemoProject();
+Project MakePart(const Project& full, int track);  // one instrument, laid out on its own
 
 Proposal MakeDemoProposal(const Project& project);
 

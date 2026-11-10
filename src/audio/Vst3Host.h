@@ -27,6 +27,7 @@ public:
     void Process(const MidiEvent* events, int count, float* left, float* right,
                  int frames) override;
     void SetTempo(double tempo) override;
+    bool NeedsRealTime() const override { return true; }
     bool OpenEditor(wxWindow* parent, const wxString& title);
     // UI thread. These capture and restore the plugin's settings, including its patch.
     void GetState(std::string& component, std::string& controller) const;

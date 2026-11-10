@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -38,6 +39,21 @@ public:
     void Preview(int track, int pitch);
 
     double Beats();
+
+    // Plays from startBeat to stopBeat, after countInClicks clicks spaced secondsPerClick apart.
+    // Used for recording takes; the click setting applies after the count-in.
+    void PlayTake(double startBeat, double stopBeat, int countInClicks, double secondsPerClick);
+    // When the take's first beat reached the speakers, in 100 ns performance-counter units.
+    // False until it has.
+    bool TakeStartTime(int64_t& hns) const;
+    bool InCountIn() const { return preroll_ > 0; }
+
+    // Renders the piece once into interleaved stereo: the full mix plus one stem per track.
+    // Runs at playback speed if any plugin is in use, otherwise as fast as it can.
+    // progress gets 0 to 1 and returns false to cancel, which makes this return false.
+    bool Bounce(std::vector<float>& mix, std::vector<std::vector<float>>& stems,
+                const std::function<bool(double)>& progress);
+    bool BounceIsRealTime() const;
     bool IsPlaying() const { return playing_; }
     float TakePeak(int track);  // level since the last call, 0 to 1
 
@@ -58,7 +74,7 @@ private:
     void RenderBlock();
     void Emit(int track, int offset, int pitch, bool on, float velocity = 0.8f);
     void Mix();
-    void AddClick(int64_t start);
+    void AddClick(int64_t start, const std::vector<int64_t>& clicks);
     void MoveCursor();
     struct TempoSegment {
         double beat, sample, samplesPerBeat, bpm;
@@ -68,7 +84,7 @@ private:
 
     int tracks_;
     double sampleRate_ = 48000;
-    std::atomic<bool> running_{true}, hasDevice_{false}, playing_{false};
+    std::atomic<bool> running_{true}, hasDevice_{false}, playing_{false}, offline_{false};
     std::atomic<int64_t> position_{0};
     std::thread thread_;
 
@@ -84,8 +100,20 @@ private:
     int clickFrames_ = 0;
     double clickPhase_ = 0;
     std::vector<TempoSegment> tempoMap_;
+    std::vector<std::vector<float>>* captureStems_ = nullptr;
     double currentBpm_ = 96;
     std::vector<int64_t> clicks_;
+    std::vector<int64_t> countInClicks_;  // positions within the count-in
+    std::atomic<int64_t> preroll_{0};     // count-in frames left; a multiple of kBlock
+    int64_t prerollTotal_ = 0;
+    int64_t stopSample_ = INT64_MAX;
+    bool markTake_ = false;
+    std::atomic<bool> hasTakeTime_{false};
+    std::atomic<int64_t> takeHns_{0};
+    // Output stream bookkeeping, used to time takes against the device clock.
+    int64_t blockStreamFrame_ = 0;
+    std::atomic<int64_t> takeStreamFrame_{0};
+    std::atomic<bool> takeFromStream_{false};
 
     std::vector<float> mixL_, mixR_, trackL_, trackR_;
     std::unique_ptr<std::atomic<float>[]> peaks_;

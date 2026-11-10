@@ -31,13 +31,16 @@ public:
     void PreviewEnded();       // the score left a preview by itself
     void InvalidateProposals();  // staff numbering changed, so none can be applied
     void RefreshModelName();
+    // Sends a message on the user's behalf with extra material, such as a sung melody, added to
+    // the context. Returns false if a reply is still in progress.
+    bool SendWithContext(const wxString& message, const wxString& extraContext);
 
     // proposal is null when the state is None.
     std::function<void(const Proposal* proposal, ProposalState state)> onProposal;
     std::function<void()> onOpenSettings;
 
 private:
-    void Send(const wxString& text);
+    void Send(const wxString& text, const wxString& extraContext = wxEmptyString);
     void SetBusy(bool busy);
     wxString BuildContext() const;
 

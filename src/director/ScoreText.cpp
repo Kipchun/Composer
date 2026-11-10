@@ -214,6 +214,11 @@ wxString DescribeProject(const Project& project) {
         for (const TempoChange& t : project.tempos)
             out += wxString::Format(" bar %d to %d", t.bar + 1, t.bpm) + (t.text.empty() ? wxString() : " (" + t.text + ")") + ";";
     }
+    if (!project.ramps.empty()) {
+        out += "\nGradual tempo changes:";
+        for (const TempoRamp& r : project.ramps)
+            out += " " + r.text + wxString::Format(" bars %d-%d arriving at %d;", r.bar + 1, r.endBar + 1, r.endBpm);
+    }
     if (!project.sections.empty()) {
         out += "\nRehearsal marks:";
         for (const Section& section : project.sections) out += " " + section.label + wxString::Format(" at bar %d;", section.bar + 1);

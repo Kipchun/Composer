@@ -273,6 +273,47 @@ void ScoreCanvas::SetTempoChange(int bar, int bpm, const wxString& text, bool re
     Changed();
 }
 
+void ScoreCanvas::SetTempoRamp(int firstBar, int lastBar, int endBpm, const wxString& text, bool remove) {
+    EndPreview();
+    PushUndo();
+    auto& ramps = project_.ramps;
+    ramps.erase(std::remove_if(ramps.begin(), ramps.end(),
+                               [&](const TempoRamp& r) { return r.bar <= lastBar && r.endBar >= firstBar; }),
+                ramps.end());
+    if (!remove) {
+        // A step inside the span would fight with it.
+        auto& tempos = project_.tempos;
+        tempos.erase(std::remove_if(tempos.begin(), tempos.end(),
+                                    [&](const TempoChange& t) { return t.bar > firstBar && t.bar <= lastBar; }),
+                     tempos.end());
+        TempoRamp ramp;
+        ramp.bar = firstBar;
+        ramp.endBar = lastBar;
+        ramp.endBpm = endBpm;
+        ramp.text = text;
+        ramps.push_back(std::move(ramp));
+        std::sort(ramps.begin(), ramps.end(), [](const TempoRamp& a, const TempoRamp& b) { return a.bar < b.bar; });
+    }
+    Changed();
+}
+
+wxImage ScoreCanvas::RenderPage(int page, int pixelWidth) {
+    const double scale = pixelWidth / kPageW;
+    wxBitmap bitmap(pixelWidth, int(pageH_ * scale), 24);
+    wxMemoryDC dc(bitmap);
+    dc.SetBackground(*wxWHITE_BRUSH);
+    dc.Clear();
+    {
+        Gc gc(wxGraphicsContext::Create(dc));
+        gc->Scale(scale, scale);
+        printing_ = true;
+        DrawPage(*gc, page, -1e9, 1e9);
+        printing_ = false;
+    }
+    dc.SelectObject(wxNullBitmap);
+    return bitmap.ConvertToImage();
+}
+
 void ScoreCanvas::SetMeterChange(int bar, int top, int bottom) {
     EndPreview();
     PushUndo();
@@ -318,7 +359,7 @@ void ScoreCanvas::SetMeterChange(int bar, int top, int bottom) {
 void ScoreCanvas::FitMarksToBars() { project_.FitMarksToBars(); }
 
 ScoreCanvas::Snapshot ScoreCanvas::Capture() const {
-    return {score_, project_.settings, project_.meters, project_.tempos, project_.sections,
+    return {score_, project_.settings, project_.meters, project_.tempos, project_.ramps, project_.sections,
             project_.markings, project_.hairpins, project_.slurs};
 }
 
@@ -327,6 +368,7 @@ void ScoreCanvas::Restore(Snapshot snapshot) {
     project_.settings = std::move(snapshot.settings);
     project_.meters = std::move(snapshot.meters);
     project_.tempos = std::move(snapshot.tempos);
+    project_.ramps = std::move(snapshot.ramps);
     project_.sections = std::move(snapshot.sections);
     project_.markings = std::move(snapshot.markings);
     project_.hairpins = std::move(snapshot.hairpins);
@@ -721,8 +763,10 @@ void ScoreCanvas::OnPaint(wxPaintEvent&) {
 }
 
 void ScoreCanvas::DrawPage(wxGraphicsContext& gc, int page, double viewTop, double viewBottom) {
-    FillRound(gc, wxRect2DDouble(4, 6, kPageW, pageH_), 2, wxColour(0, 0, 0, 90));
-    FillRound(gc, wxRect2DDouble(0, 0, kPageW, pageH_), 2, kPaper);
+    if (!printing_) {
+        FillRound(gc, wxRect2DDouble(4, 6, kPageW, pageH_), 2, wxColour(0, 0, 0, 90));
+        FillRound(gc, wxRect2DDouble(0, 0, kPageW, pageH_), 2, kPaper);
+    }
 
     double w, h, d, l;
     if (page == 0) {
@@ -908,6 +952,29 @@ void ScoreCanvas::DrawSystem(wxGraphicsContext& gc, int system) {
             x += TextWidth(gc, t.text, font) + 8;
         }
         DrawTextAt(gc, Glyph(0x2669) + wxString::Format(" = %d", t.bpm), x, firstTop - 47, MusicFont(14), ink);
+    }
+
+    for (const TempoRamp& ramp : project_.ramps) {
+        if (ramp.bar >= endBar || ramp.endBar < firstBar) continue;
+        const wxColour& ink = ramp.proposed ? kProposal : kInk;
+        const double y = firstTop - 40;
+        double x = ramp.bar >= firstBar ? BarX(ramp.bar) + (ramp.bar == firstBar ? 28 : 3) : BarX(firstBar) + 3;
+        if (ramp.bar >= firstBar) {
+            const wxFont font = SerifFont(14, true, true);
+            DrawTextAt(gc, ramp.text, x, firstTop - 46, font, ink);
+            x += TextWidth(gc, ramp.text, font) + 8;
+        }
+
+        double lineEndX = ramp.endBar < endBar ? BarX(ramp.endBar) + BarWidth(ramp.endBar) - 4 : lineEnd;
+        if (ramp.endBar < endBar) {
+            // The tempo it arrives at closes the marking.
+            const wxString target = Glyph(0x2669) + wxString::Format(" = %d", ramp.endBpm);
+            const wxFont font = MusicFont(14);
+            lineEndX -= TextWidth(gc, target, font);
+            DrawTextAt(gc, target, lineEndX, firstTop - 47, font, ink);
+            lineEndX -= 6;
+        }
+        for (double dash = x; dash < lineEndX; dash += 11) Line(gc, dash, y, std::min(dash + 6, lineEndX), y, ink, 1);
     }
 
     for (const Section& section : project_.sections) {
@@ -1698,8 +1765,29 @@ void ScoreCanvas::Redo() {
 }
 
 std::vector<std::pair<double, double>> ScoreCanvas::TempoPoints() const {
-    std::vector<std::pair<double, double>> points = {{0.0, double(project_.settings.tempo)}};
-    for (const TempoChange& t : project_.tempos) points.emplace_back(project_.BarStart(t.bar), double(t.bpm));
+    double current = project_.settings.tempo;
+    std::vector<std::pair<double, double>> points = {{0.0, current}};
+    size_t t = 0, r = 0;
+    while (t < project_.tempos.size() || r < project_.ramps.size()) {
+        const bool stepNext = r >= project_.ramps.size() ||
+                              (t < project_.tempos.size() && project_.tempos[t].bar <= project_.ramps[r].bar);
+        if (stepNext) {
+            current = project_.tempos[t].bpm;
+            points.emplace_back(project_.BarStart(project_.tempos[t].bar), current);
+            ++t;
+            continue;
+        }
+        // A ramp plays as many tiny steps, each using the tempo at its midpoint.
+        const TempoRamp& ramp = project_.ramps[r++];
+        const double start = project_.BarStart(ramp.bar), end = project_.BarStart(ramp.endBar + 1);
+        const double step = std::max(0.25, (end - start) / 400);
+        for (double at = start; at < end - kEps; at += step) {
+            const double middle = std::min(at + step / 2, end);
+            points.emplace_back(at, current + (ramp.endBpm - current) * (middle - start) / (end - start));
+        }
+        current = ramp.endBpm;
+        points.emplace_back(end, current);
+    }
     return points;
 }
 

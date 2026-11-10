@@ -14,6 +14,8 @@ class Instrument {
 public:
     virtual ~Instrument() = default;
     virtual void SetTempo(double) {}
+    // Instruments that stream from disk can only render at playback speed.
+    virtual bool NeedsRealTime() const { return false; }
     // Called on the audio thread. Writes exactly `frames` samples to left and right.
     virtual void Process(const MidiEvent* events, int count, float* left, float* right,
                          int frames) = 0;

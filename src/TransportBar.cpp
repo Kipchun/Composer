@@ -226,7 +226,6 @@ void TransportBar::OnLeftDown(wxMouseEvent& e) {
     switch (b->action) {
         case Loop: loop_ = !loop_; break;
         case Click: click_ = !click_; break;
-        case Record: recording_ = !recording_; break;
         case ViewScore:
         case ViewParts:
         case ViewRoll: view_ = b->action; break;

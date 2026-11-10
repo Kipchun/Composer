@@ -3,9 +3,12 @@
 #include <wx/filedlg.h>
 #include <wx/filename.h>
 #include <wx/progdlg.h>
+#include <wx/stdpaths.h>
 
+#include <cmath>
 #include <set>
 
+#include "Exporter.h"
 #include "ProjectDialogs.h"
 #include "director/DirectorSettings.h"
 
@@ -24,6 +27,9 @@ enum {
     ID_DirectorNew,
     ID_MeterChange,
     ID_TempoChange,
+    ID_TempoRamp,
+    ID_Export,
+    ID_Sing,
 };
 const char* const kFileFilter = "Composer projects (*.composer)|*.composer";
 const char* const kPaneDirector = "director";
@@ -58,7 +64,7 @@ void MainFrame::BuildMenus() {
     file->Append(wxID_OPEN, "&Open...\tCtrl+O");
     file->Append(wxID_SAVE, "&Save\tCtrl+S");
     file->Append(wxID_SAVEAS, "Save &As...\tCtrl+Shift+S");
-    file->Append(wxID_ANY, "&Export...");
+    file->Append(ID_Export, "&Export...\tCtrl+E");
     file->AppendSeparator();
     file->Append(wxID_EXIT, "E&xit");
 
@@ -79,6 +85,7 @@ void MainFrame::BuildMenus() {
     // Plain-letter shortcuts are handled in OnCharHook so they can't steal typing
     // from the Director's text box, which is why these labels aren't accelerators.
     notes->AppendCheckItem(ID_NoteInput, "Note &Input Mode (N)");
+    notes->Append(ID_Sing, "&Sing a Melody...\tCtrl+R");
     notes->Append(wxID_ANY, "&Transpose...");
 
     auto* score = new wxMenu;
@@ -87,6 +94,7 @@ void MainFrame::BuildMenus() {
     score->Append(ID_ProjectSettings, "Project &Settings...\tCtrl+Shift+P");
     score->Append(ID_MeterChange, "&Change Time Signature at Selection...\tCtrl+Shift+T");
     score->Append(ID_TempoChange, "Change Te&mpo at Selection...\tCtrl+Shift+M");
+    score->Append(ID_TempoRamp, "&Gradual Tempo Change (rit. / accel.)...\tCtrl+Shift+G");
 
     auto* playback = new wxMenu;
     playback->Append(wxID_ANY, "&Play / Pause (Space)");
@@ -117,6 +125,9 @@ void MainFrame::BuildMenus() {
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeInstruments(); }, ID_ChangeInstruments);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeMeter(); }, ID_MeterChange);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ChangeTempo(); }, ID_TempoChange);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { AddTempoRamp(); }, ID_TempoRamp);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ExportProject(); }, ID_Export);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowSing(); }, ID_Sing);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) {
         ShowDirectorSettings(this);
         director_->RefreshModelName();
@@ -302,6 +313,7 @@ void MainFrame::ApplyProject(const Project& project, const wxString& path, bool 
     transport_->SetPosition(1, 1);
 
     // The old engine owns plugins whose windows must close before the list goes away.
+    if (sing_) sing_->Detach();
     engine_.reset();
     if (instruments_) instruments_->Destroy();
 
@@ -316,6 +328,7 @@ void MainFrame::ApplyProject(const Project& project, const wxString& path, bool 
 
     instruments_ = new InstrumentsWindow(this, engine_.get(), current.tracks);
     instruments_->onChanged = [this] { SetModified(true); };
+    if (sing_) sing_->Attach(engine_.get());
 
     wxString missing;
     if (!current.plugins.empty()) {
@@ -500,8 +513,43 @@ void MainFrame::OnClose(wxCloseEvent& event) {
         return;
     }
     timer_.Stop();
+    if (sing_) sing_->Detach();
     engine_.reset();  // shuts plugins down while their windows still exist
     event.Skip();
+}
+
+void MainFrame::ShowSing() {
+    if (!sing_) {
+        SingWindow::Host host;
+        host.project = [this]() -> const Project& { return score_->GetProject(); };
+        host.scorePlayback = [this] { return score_->BuildPlayback(); };
+        host.clickBeats = [this] { return score_->ClickBeats(); };
+        host.tempoPoints = [this] { return score_->TempoPoints(); };
+        host.selectedBar = [this] { return score_->GetSelection().IsValid() ? score_->GetSelection().firstBar : -1; };
+        host.stopMainPlayback = [this] { StopPlayback(); };
+        host.restoreSchedule = [this] {
+            PushSchedule();
+            engine_->SetClick(transport_->IsClickOn());
+            Publish();
+        };
+        host.insert = [this](const Proposal& proposal) {
+            score_->EndPreview();
+            score_->ApplyProposal(proposal);
+            SetStatusText("Sung melody inserted. Ctrl+Z to undo.", 0);
+        };
+        host.develop = [this](const wxString& message, const wxString& context) {
+            wxAuiPaneInfo& pane = aui_.GetPane(kPaneDirector);
+            if (!pane.IsShown()) {
+                pane.Show();
+                aui_.Update();
+            }
+            return director_->SendWithContext(message, context);
+        };
+        host.recordingChanged = [this](bool recording) { transport_->SetRecording(recording); };
+        sing_ = new SingWindow(this, std::move(host), engine_.get());
+    }
+    const BarRange& selection = score_->GetSelection();
+    sing_->ShowFor(selection.IsValid() ? selection.firstBar : -1);
 }
 
 void MainFrame::SyncInputValue() {
@@ -528,6 +576,7 @@ void MainFrame::OnCharHook(wxKeyEvent& event) {
     }
     if (!score_->IsNoteInput()) {
         if (key == 'N') score_->SetNoteInput(true);
+        else if (key == 'R') ShowSing();
         else if (key == 'I') ShowInstruments();
         else event.Skip();
         return;
@@ -596,6 +645,60 @@ void MainFrame::ChangeTempo() {
     SetStatusText("Tempo updated. Ctrl+Z to undo.", 0);
 }
 
+void MainFrame::AddTempoRamp() {
+    score_->EndPreview();
+    const BarRange& range = score_->GetSelection();
+    if (!range.IsValid()) {
+        SetStatusText("Select the bars the tempo should change across first", 0);
+        return;
+    }
+    const Project& project = score_->GetProject();
+    const int first = range.firstBar, last = range.lastBar;
+    bool hasRamp = false;
+    for (const TempoRamp& ramp : project.ramps) hasRamp = hasRamp || (ramp.bar <= last && ramp.endBar >= first);
+
+    TempoRampDialog dialog(this, first, last, project.TempoAt(first), hasRamp);
+    if (dialog.ShowModal() != wxID_OK) return;
+    score_->SetTempoRamp(first, last, dialog.EndBpm(), dialog.Text(), dialog.RemoveRequested());
+    SetStatusText("Tempo updated. Ctrl+Z to undo.", 0);
+}
+
+void MainFrame::ExportProject() {
+    score_->EndPreview();
+    StopPlayback();
+    const Project& project = score_->GetProject();
+    const wxString folder = path_.empty() ? wxStandardPaths::Get().GetDocumentsDir() : wxFileName(path_).GetPath();
+
+    ExportDialog dialog(this, project, folder);
+    if (dialog.ShowModal() != wxID_OK) return;
+    const ExportOptions options = dialog.GetOptions();
+    if (options.folder.empty() || !wxDirExists(options.folder)) {
+        wxMessageBox("That folder doesn't exist.", "Export", wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    const std::vector<wxString> paths = ExportFilePaths(project, options);
+    int existing = 0;
+    for (const wxString& path : paths) existing += wxFileExists(path) ? 1 : 0;
+    if (existing > 0 &&
+        wxMessageBox(wxString::Format("%d of these files already exist and will be replaced.\n\nContinue?", existing), "Export",
+                     wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) != wxYES)
+        return;
+
+    wxString error;
+    if (!RunExport(this, project, *engine_, options, &error)) {
+        if (error.empty()) SetStatusText("Export cancelled", 0);
+        else wxMessageBox("The export stopped.\n\n" + error, "Export", wxOK | wxICON_ERROR, this);
+        return;
+    }
+    SetStatusText(wxString::Format("Exported %zu files", paths.size()), 0);
+
+    wxMessageDialog done(this, wxString::Format("Exported %zu files to:\n%s", paths.size(), options.folder), "Export",
+                         wxYES_NO | wxICON_INFORMATION);
+    done.SetYesNoLabels("Open Folder", "Close");
+    if (done.ShowModal() == wxID_YES) wxLaunchDefaultApplication(options.folder);
+}
+
 void MainFrame::ChangeMeter() {
     score_->EndPreview();
     const BarRange& range = score_->GetSelection();
@@ -628,7 +731,12 @@ void MainFrame::TogglePane(const wxString& name) {
 
 void MainFrame::OnTransport(TransportBar::Action action) {
     switch (action) {
+        case TransportBar::Record:
+            if (sing_ && sing_->IsBusy()) sing_->StopAll();
+            else ShowSing();
+            break;
         case TransportBar::Play:
+            if (sing_ && sing_->IsBusy()) sing_->StopAll();
             playing_ = !playing_;
             showHead_ = true;
             transport_->SetPlaying(playing_);
@@ -686,5 +794,5 @@ void MainFrame::Publish() {
     int top, bottom;
     project.MeterAt(bar, top, bottom);
     transport_->SetTimeLabel(wxString::Format("%d/%d", top, bottom));
-    transport_->SetTempoValue(project.TempoAt(bar));
+    transport_->SetTempoValue(int(std::lround(project.TempoAtBeat(beats_))));
 }

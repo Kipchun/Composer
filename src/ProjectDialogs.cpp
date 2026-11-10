@@ -167,6 +167,53 @@ TempoDialog::TempoDialog(wxWindow* parent, int bar, int bpm, const wxString& tex
     CentreOnParent();
 }
 
+wxString TempoRampDialog::Text() const {
+    static const char* const kMarkings[] = {"rit.", "rall.", "accel."};
+    return kMarkings[marking_->GetSelection()];
+}
+
+TempoRampDialog::TempoRampDialog(wxWindow* parent, int firstBar, int lastBar, int currentBpm, bool hasRamp)
+    : wxDialog(parent, wxID_ANY, "Gradual Tempo Change") {
+    SetBackgroundColour(kPanel);
+    marking_ = new wxChoice(this, wxID_ANY);
+    for (const char* name : {"Ritardando (rit.)", "Rallentando (rall.)", "Accelerando (accel.)"}) marking_->Append(name);
+    marking_->SetSelection(0);
+    bpm_ = new wxSpinCtrl(this, wxID_ANY, "", wxDefaultPosition, wxSize(90, -1), wxSP_ARROW_KEYS, 20, 300,
+                          std::max(20, currentBpm * 3 / 4));
+    marking_->Bind(wxEVT_CHOICE, [this, currentBpm](wxCommandEvent&) {
+        bpm_->SetValue(marking_->GetSelection() == 2 ? std::min(300, currentBpm * 5 / 4) : std::max(20, currentBpm * 3 / 4));
+    });
+
+    auto* grid = new wxFlexGridSizer(2, 8, 12);
+    grid->Add(Label(this, "Marking"), 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(marking_);
+    grid->Add(Label(this, "Arrive at quarter ="), 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(bpm_);
+
+    const wxString range = firstBar == lastBar ? wxString::Format("Across bar %d:", firstBar + 1)
+                                               : wxString::Format("Across bars %d-%d:", firstBar + 1, lastBar + 1);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    sizer->Add(Label(this, range, kText), 0, wxALL, 16);
+    sizer->Add(grid, 0, wxLEFT | wxRIGHT, 16);
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    if (hasRamp) {
+        auto* remove = new wxButton(this, wxID_ANY, "Remove");
+        remove->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            remove_ = true;
+            EndModal(wxID_OK);
+        });
+        buttons->Add(remove);
+    }
+    buttons->AddStretchSpacer();
+    buttons->Add(new wxButton(this, wxID_OK, "OK"), 0, wxRIGHT, 8);
+    buttons->Add(new wxButton(this, wxID_CANCEL, "Cancel"));
+    sizer->Add(buttons, 0, wxEXPAND | wxALL, 16);
+    SetSizerAndFit(sizer);
+    SetMinSize(wxSize(340, -1));
+    Fit();
+    CentreOnParent();
+}
+
 InstrumentPicker::InstrumentPicker(wxWindow* parent) : wxPanel(parent) {
     SetBackgroundColour(kPanel);
 

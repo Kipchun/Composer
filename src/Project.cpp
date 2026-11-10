@@ -184,13 +184,25 @@ int Project::BarAtBeat(double beat) const {
     return std::clamp(from + int((beat - position) / beats + 1e-9), 0, settings.bars - 1);
 }
 
-int Project::TempoAt(int bar) const {
-    int bpm = settings.tempo;
-    for (const TempoChange& change : tempos) {
-        if (change.bar > bar) break;
-        bpm = change.bpm;
+int Project::TempoAt(int bar) const { return int(std::lround(TempoAtBeat(BarStart(bar)))); }
+
+double Project::TempoAtBeat(double beat) const {
+    double current = settings.tempo;
+    size_t t = 0, r = 0;
+    while (t < tempos.size() || r < ramps.size()) {
+        const bool stepNext = r >= ramps.size() || (t < tempos.size() && tempos[t].bar <= ramps[r].bar);
+        if (stepNext) {
+            if (BarStart(tempos[t].bar) > beat + 1e-6) return current;
+            current = tempos[t++].bpm;
+        } else {
+            const TempoRamp& ramp = ramps[r++];
+            const double start = BarStart(ramp.bar), end = BarStart(ramp.endBar + 1);
+            if (beat < start - 1e-6) return current;
+            if (beat < end) return current + (ramp.endBpm - current) * (beat - start) / (end - start);
+            current = ramp.endBpm;
+        }
     }
-    return bpm;
+    return current;
 }
 
 void Project::NormalizeMeters() {
@@ -225,6 +237,8 @@ void Project::FitMarksToBars() {
                  tempos.end());
     meters.erase(std::remove_if(meters.begin(), meters.end(), [&](const MeterChange& m) { return m.bar >= count; }),
                  meters.end());
+    ramps.erase(std::remove_if(ramps.begin(), ramps.end(), [&](const TempoRamp& r) { return r.bar >= count; }), ramps.end());
+    for (TempoRamp& ramp : ramps) ramp.endBar = std::min(ramp.endBar, count - 1);
 }
 
 namespace {
@@ -317,6 +331,15 @@ Project ProjectWithProposal(const Project& base, const Proposal& p, bool flagPro
         r.tempos.push_back(std::move(t));
     }
     std::sort(r.tempos.begin(), r.tempos.end(), [](const TempoChange& a, const TempoChange& b) { return a.bar < b.bar; });
+
+    for (int bar : p.removedRamps)
+        r.ramps.erase(std::remove_if(r.ramps.begin(), r.ramps.end(), [&](const TempoRamp& x) { return x.bar == bar; }),
+                      r.ramps.end());
+    for (TempoRamp ramp : p.setRamps) {
+        ramp.proposed = flagProposed;
+        r.ramps.push_back(std::move(ramp));
+    }
+    std::sort(r.ramps.begin(), r.ramps.end(), [](const TempoRamp& a, const TempoRamp& b) { return a.bar < b.bar; });
 
     for (int bar : p.removedSections)
         r.sections.erase(std::remove_if(r.sections.begin(), r.sections.end(), [&](const Section& x) { return x.bar == bar; }),
@@ -420,6 +443,7 @@ Project RebuildWithParts(const Project& old, std::vector<ScorePart> parts,
     result.sections = old.sections;
     result.meters = old.meters;
     result.tempos = old.tempos;
+    result.ramps = old.ramps;
     for (auto& staff : result.score)
         for (int bar = 0; bar < int(staff.size()); ++bar) staff[bar] = FullBarRest(result.BarBeats(bar));
 
@@ -596,6 +620,34 @@ bool ParseBar(const wxString& text, Bar& out) {
     return !out.empty();
 }
 
+Project MakePart(const Project& full, int track) {
+    Project part;
+    part.settings = full.settings;
+    part.settings.subtitle = full.tracks[track].name;
+    part.tracks = {full.tracks[track]};
+    part.sections = full.sections;
+    part.meters = full.meters;
+    part.tempos = full.tempos;
+    part.ramps = full.ramps;
+
+    std::vector<int> staffMap(full.staves.size(), -1);
+    for (int staff = 0; staff < int(full.staves.size()); ++staff) {
+        if (full.staves[staff].track != track) continue;
+        staffMap[staff] = int(part.staves.size());
+        StaffDef def = full.staves[staff];
+        def.track = 0;
+        part.staves.push_back(def);
+        part.score.push_back(full.score[staff]);
+    }
+    for (Marking m : full.markings)
+        if (staffMap[m.staff] >= 0) { m.staff = staffMap[m.staff]; part.markings.push_back(std::move(m)); }
+    for (Hairpin h : full.hairpins)
+        if (staffMap[h.staff] >= 0) { h.staff = staffMap[h.staff]; part.hairpins.push_back(h); }
+    for (Slur slur : full.slurs)
+        if (staffMap[slur.staff] >= 0) { slur.staff = staffMap[slur.staff]; part.slurs.push_back(slur); }
+    return part;
+}
+
 Project MakeDemoProject() {
     ProjectSettings settings;
     settings.title = "Nocturne in Blue";
@@ -750,6 +802,8 @@ bool SaveProjectFile(const wxString& path, const Project& project, wxString* err
                             wxString::Format("\t%d", h.crescendo ? 1 : 0));
     for (const TempoChange& t : project.tempos)
         line("tempochange", wxString::Format("%d\t%d\t", t.bar, t.bpm) + Escape(t.text));
+    for (const TempoRamp& r : project.ramps)
+        line("temporamp", wxString::Format("%d\t%d\t%d\t", r.bar, r.endBar, r.endBpm) + Escape(r.text));
     for (const MeterChange& m : project.meters)
         line("meter", wxString::Format("%d\t%d\t%d", m.bar, m.top, m.bottom));
     for (size_t staff = 0; staff < project.score.size(); ++staff)
@@ -856,6 +910,11 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
             ok = ToInt(f[1], t.bar) && ToInt(f[2], t.bpm) && t.bpm >= 10 && t.bpm <= 400;
             t.text = Unescape(f[3]);
             p.tempos.push_back(std::move(t));
+        } else if (key == "temporamp" && need(4)) {
+            TempoRamp r;
+            ok = ToInt(f[1], r.bar) && ToInt(f[2], r.endBar) && ToInt(f[3], r.endBpm) && r.endBpm >= 10 && r.endBpm <= 400;
+            r.text = Unescape(f[4]);
+            p.ramps.push_back(std::move(r));
         } else if (key == "meter" && need(3)) {
             MeterChange m{};
             ok = ToInt(f[1], m.bar) && ToInt(f[2], m.top) && ToInt(f[3], m.bottom) && m.top >= 1 && m.top <= 16 &&
@@ -894,6 +953,13 @@ bool LoadProjectFile(const wxString& path, Project& out, wxString* error) {
     std::sort(p.tempos.begin(), p.tempos.end(), [](const TempoChange& a, const TempoChange& b) { return a.bar < b.bar; });
     for (const TempoChange& t : p.tempos)
         if (t.bar < 1 || t.bar >= s.bars) return Fail(error, "The project file is damaged (tempo changes).");
+
+    std::sort(p.ramps.begin(), p.ramps.end(), [](const TempoRamp& a, const TempoRamp& b) { return a.bar < b.bar; });
+    for (size_t i = 0; i < p.ramps.size(); ++i) {
+        const TempoRamp& r = p.ramps[i];
+        if (r.bar < 0 || r.endBar < r.bar || r.endBar >= s.bars || (i + 1 < p.ramps.size() && p.ramps[i + 1].bar <= r.endBar))
+            return Fail(error, "The project file is damaged (gradual tempo changes).");
+    }
 
     p.score.assign(p.staves.size(), std::vector<Bar>(s.bars));
     for (auto& staff : p.score)

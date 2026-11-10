@@ -13,6 +13,7 @@
 #include "TimelinePanel.h"
 #include "TransportBar.h"
 #include "audio/AudioEngine.h"
+#include "sing/SingWindow.h"
 
 class MainFrame : public wxFrame {
 public:
@@ -30,6 +31,8 @@ private:
     void Select(const BarRange& range);
     void ChangeMeter();
     void ChangeTempo();
+    void AddTempoRamp();
+    void ExportProject();
     void OnPaletteMark(char articulation, const wxString& dynamic, int hairpin);
     void OnCharHook(wxKeyEvent& event);
     void SyncInputValue();
@@ -47,6 +50,7 @@ private:
     void UpdateTitle();
     void StopPlayback();
     void ShowInstruments();
+    void ShowSing();
     void OnClose(wxCloseEvent& event);
 
     wxAuiManager aui_;
@@ -56,6 +60,7 @@ private:
     TimelinePanel* timeline_ = nullptr;
     DirectorPanel* director_ = nullptr;
     InstrumentsWindow* instruments_ = nullptr;
+    SingWindow* sing_ = nullptr;  // created the first time it's opened
     std::unique_ptr<AudioEngine> engine_;
     wxString path_;
     bool modified_ = false;

@@ -57,19 +57,23 @@ add_executable(Composer WIN32
     src/DirectorPanel.cpp
     src/InstrumentsWindow.cpp
     src/Project.cpp
+    src/Exporter.cpp
     src/ProjectDialogs.cpp
     src/director/ScoreText.cpp
     src/director/DirectorClient.cpp
     src/director/DirectorSession.cpp
     src/director/DirectorSettings.cpp
     src/audio/AudioEngine.cpp
+    src/audio/MicRecorder.cpp
+    src/sing/Melody.cpp
+    src/sing/SingWindow.cpp
     src/audio/PlaceholderSynth.cpp
     src/audio/Vst3Host.cpp
     src/Composer.rc
 )
 
 target_include_directories(Composer PRIVATE src third_party)
-target_link_libraries(Composer PRIVATE ${wxWidgets_LIBRARIES} vst3host avrt ole32 shell32 winhttp crypt32 advapi32)
+target_link_libraries(Composer PRIVATE ${wxWidgets_LIBRARIES} vst3host avrt ole32 shell32 winhttp crypt32 advapi32 mfplat mfreadwrite mfuuid mf)
 target_compile_definitions(Composer PRIVATE UNICODE _UNICODE NOMINMAX)
 
 if(MSVC)

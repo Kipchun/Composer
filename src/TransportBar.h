@@ -18,6 +18,10 @@ public:
     void SetTimeLabel(const wxString& time);
     void SetTempoValue(int bpm);
     void SetProjectInfo(int tempo, const wxString& key, const wxString& time);
+    void SetRecording(bool recording) {
+        recording_ = recording;
+        Refresh();
+    }
     bool IsLooping() const { return loop_; }
     bool IsClickOn() const { return click_; }
 
